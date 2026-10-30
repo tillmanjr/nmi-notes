@@ -201,7 +201,7 @@ folder", "Exit". Double-click opens Note List. Re-add icon on
 
 ## Testing
 
-- `core`: unit tests for every op, append-separator rule, revisions/updated,
+- `model`: unit tests for every op, append-separator rule, revisions/updated,
   notification order, soft delete/undelete, Copy not touching `updated`,
   flush-before-dispatch; `proptest` for diff round-trip and caret/selection
   adjustment.
@@ -218,7 +218,7 @@ folder", "Exit". Double-click opens Note List. Re-add icon on
 
 Single crate `nmi-notes`:
 
-- `src/core/` — model, ops, store, diff, text normalization, placement math.
+- `src/model/` — model, ops, store, diff, text normalization, placement math.
 - `src/persist/` — schema, migrations, writer thread, backups.
 - `src/win/` — tray, hotkeys, clipboard, toast, vdesktop, editor, list,
   window placement glue.
