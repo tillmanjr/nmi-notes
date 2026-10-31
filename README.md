@@ -11,8 +11,9 @@ between apps, screens, and virtual desktops without leaving what you're doing.
 | `Win+Alt+C` | **Copy** the Current note to the clipboard — toast only |
 | `Win+Alt+L` | Note **list**: filter, open, set Current, delete |
 
-Editor: `Esc`/`Ctrl+W` close, `Ctrl+Shift+Enter` make Current. Edits save
-automatically (~250 ms after you stop typing, and on focus loss/close).
+Editor: `Esc`/`Ctrl+W` close (`Esc` returns to the list, filter and
+selection intact, when the note was opened from it), `Ctrl+Shift+Enter` make
+Current. Edits save automatically (~250 ms after you stop typing, and on focus loss/close).
 
 List: type to filter, `↓`/`Tab` to the list, `Enter` open selected,
 `Ctrl+Enter` make Current, `Del` delete, `Ctrl+Z` undo delete, `Esc` close.

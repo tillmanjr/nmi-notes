@@ -27,7 +27,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, IsIconic,
-    LoadCursorW, MoveWindow, RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    LoadCursorW, MoveWindow, RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow,
     EN_CHANGE, ES_AUTOHSCROLL, HMENU, HWND_TOP, IDC_ARROW, MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SW_RESTORE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
     WM_GETMINMAXINFO, WM_NOTIFY, WM_SETFOCUS, WM_SETREDRAW, WM_SIZE, WNDCLASSEXW, WS_CHILD, CS_HREDRAW, CS_VREDRAW,
@@ -278,6 +278,26 @@ pub fn filter_text(h: HWND) -> String {
         let mut buf = vec![0u16; len + 1];
         let n = GetWindowTextW(f, &mut buf).max(0) as usize;
         String::from_utf16_lossy(&buf[..n])
+    }
+}
+
+/// Sets the filter box text (the app refreshes the rows).
+pub fn set_filter(h: HWND, text: &str) {
+    let w = wide(text);
+    unsafe {
+        let _ = SetWindowTextW(filter(h), PCWSTR(w.as_ptr()));
+    }
+}
+
+/// Selects and focuses only the row for `id`, if present.
+pub fn select_only(h: HWND, id: NoteId) {
+    let lv = list(h);
+    let Some(i) = rows(h).iter().position(|r| r.id == id) else { return };
+    let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+    set_state(lv, -1, LIST_VIEW_ITEM_STATE_FLAGS(0), both);
+    set_state(lv, i as i32, both, both);
+    unsafe {
+        SendMessageW(lv, LVM_ENSUREVISIBLE, Some(WPARAM(i)), Some(LPARAM(0)));
     }
 }
 

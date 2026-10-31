@@ -34,6 +34,9 @@ round-trip, which briefly overwrites the clipboard).
       the end, the view follows the new text.
 - [ ] `Esc` / `Ctrl+W` close; `Ctrl+Shift+Enter` makes the note Current
       (★ in caption and status).
+- [ ] Open a note from a filtered list: status shows "Esc: back to list".
+      `Esc` closes it and the list returns with the same filter and that note
+      selected (focus in the rows). `Ctrl+W` / ✕ just close.
 - [ ] `Win+Alt+L`: list near pointer, filter focused, Current pinned top in
       bold with ★ and highlight; others newest first.
 - [ ] Type in filter: rows filter live (matches anywhere in note text).

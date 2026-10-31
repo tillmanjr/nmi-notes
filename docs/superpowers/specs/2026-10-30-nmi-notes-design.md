@@ -159,7 +159,9 @@ folder", "Exit". Double-click opens Note List. Re-add icon on
 - Caption: first line of note (+ " ★" if Current). Status strip: `★ Current`
   when applicable, updated time, sync state.
 - Keys: `Esc` / `Ctrl+W` close (flush first); `Ctrl+Shift+Enter` make
-  Current. Select/copy/cut/paste/undo native.
+  Current. In an editor opened from the list, `Esc` closes and reopens the
+  list with its last filter, the closed note selected (added 2026-10-31);
+  the status strip says so. `Ctrl+W` / ✕ only close. Select/copy/cut/paste/undo native.
 - Local edits: `EN_CHANGE` restarts a 250 ms timer. On timer / focus loss /
   close: read text, diff against last-synced text (common prefix/suffix) →
   one `Edit` op.

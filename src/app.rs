@@ -105,6 +105,8 @@ pub enum Action {
     EditorDirty(isize),
     EditorFlush(isize),
     EditorClose(isize),
+    /// Esc: close, and return to the list if the note was opened from it.
+    EditorBack(isize),
     EditorMakeCurrent(isize),
     ListFilter(isize),
     ListOpen(isize),
@@ -163,7 +165,11 @@ pub fn pre_translate(msg: &MSG) -> bool {
     let k = win::key(root);
     match win::class_name(root).as_str() {
         "NmiEditor" => {
-            if vk == VK_ESCAPE.0 || (ctrl && !shift && vk == b'W' as u16) {
+            if vk == VK_ESCAPE.0 {
+                post(Action::EditorBack(k));
+                return true;
+            }
+            if ctrl && !shift && vk == b'W' as u16 {
                 post(Action::EditorClose(k));
                 return true;
             }
@@ -211,6 +217,8 @@ struct EditorState {
     note: NoteId,
     rev: u64,
     synced: Vec<u16>,
+    /// Opened from the Note List: Esc returns there.
+    from_list: bool,
 }
 
 #[derive(Default)]
@@ -272,6 +280,8 @@ pub struct App {
     spare_list: Option<HWND>,
     lists: Vec<isize>,
     last_deleted: Vec<NoteId>,
+    /// Filter of the list that last opened notes, restored on return.
+    list_filter: String,
     fonts: Fonts,
     editor_size_96: (i32, i32),
     writer_events: Arc<Mutex<Vec<Status>>>,
@@ -306,6 +316,7 @@ impl App {
             spare_list: None,
             lists: Vec::new(),
             last_deleted: Vec::new(),
+            list_filter: String::new(),
             fonts: Fonts::default(),
             editor_size_96: EDITOR_SIZE,
             writer_events,
@@ -338,6 +349,15 @@ impl App {
             }
             Action::EditorFlush(k) => self.flush_editor(k),
             Action::EditorClose(k) => self.close_editor(k),
+            Action::EditorBack(k) => {
+                let back = self.editors.get(&k).filter(|s| s.from_list).map(|s| s.note);
+                self.close_editor(k);
+                if let Some(id) = back {
+                    let filter = std::mem::take(&mut self.list_filter);
+                    self.show_list_with(Some((&filter, id)));
+                    self.list_filter = filter;
+                }
+            }
             Action::EditorMakeCurrent(k) => {
                 if let Some(id) = self.editors.get(&k).map(|s| s.note) {
                     self.flush_editor(k);
@@ -355,11 +375,12 @@ impl App {
                 if ids.is_empty() {
                     return;
                 }
+                self.list_filter = listwin::filter_text(h);
                 unsafe {
                     let _ = DestroyWindow(h);
                 }
                 for (i, id) in ids.into_iter().enumerate() {
-                    self.show_note(id, i as i32);
+                    self.show_note(id, i as i32, true);
                 }
             }
             Action::ListMakeCurrent(k) => {
@@ -597,7 +618,7 @@ impl App {
                 clipboard::ClipRead::Busy => toast::show("Clipboard busy"),
             },
             Command::ShowCurrent => match self.store.current() {
-                Some(id) => self.show_note(id, 0),
+                Some(id) => self.show_note(id, 0, false),
                 None => toast::show("No current note"),
             },
             Command::CopyCurrent => match self.store.current() {
@@ -784,7 +805,8 @@ impl App {
                 if let Some(changes) = self.apply(Op::Create { text }, None) {
                     if let Some(Change::Created { id }) = changes.first() {
                         if let Some(n) = self.store.note(*id) {
-                            self.editors.insert(k, EditorState { note: *id, rev: n.revision, synced: current });
+                            let from_list = self.editors.get(&k).is_some_and(|s| s.from_list);
+                            self.editors.insert(k, EditorState { note: *id, rev: n.revision, synced: current, from_list });
                             self.refresh_editor_chrome(*id);
                         }
                     }
@@ -875,6 +897,9 @@ impl App {
         } else {
             status.push_str(&format!("saved   ·   updated {}", timefmt::local_time(n.updated)));
         }
+        if st.from_list {
+            status.push_str("   ·   Esc: back to list");
+        }
         editor::set_status(h, &status);
     }
 
@@ -896,8 +921,9 @@ impl App {
     }
 
     /// Shows `id` near the pointer: reuses a window on this desktop, else
-    /// opens one here. `cascade` offsets multiple windows opened together.
-    fn show_note(&mut self, id: NoteId, cascade: i32) {
+    /// opens one here. `cascade` offsets multiple windows opened together;
+    /// `from_list` makes Esc in that window return to the list.
+    fn show_note(&mut self, id: NoteId, cascade: i32, from_list: bool) {
         let Some(note) = self.store.live(id) else { return };
         let (text, rev) = (note.text.clone(), note.revision);
         let ctx = monitor::pointer_context();
@@ -912,6 +938,10 @@ impl App {
             (unsafe { IsWindowVisible(h).as_bool() }) && self.vdesk.is_on_current(h)
         });
         if let Some(k) = existing {
+            if let Some(st) = self.editors.get_mut(&k) {
+                st.from_list = from_list;
+            }
+            self.refresh_editor_chrome_for(k);
             editor::show_at(win::hwnd(k), r);
             self.log_visible();
             editor::focus(win::hwnd(k));
@@ -926,7 +956,7 @@ impl App {
         let ui_font = self.fonts.get(1, dpi, &self.config);
         editor::set_fonts(h, text_font, ui_font, dpi);
         editor::set_text(h, &text);
-        self.editors.insert(win::key(h), EditorState { note: id, rev, synced: text.encode_utf16().collect() });
+        self.editors.insert(win::key(h), EditorState { note: id, rev, synced: text.encode_utf16().collect(), from_list });
         self.refresh_editor_chrome_for(win::key(h));
         editor::show_at(h, r);
         self.log_visible();
@@ -942,6 +972,12 @@ impl App {
     // ---- list -----------------------------------------------------------------
 
     fn show_list(&mut self) {
+        self.show_list_with(None);
+    }
+
+    /// `back`: returning from an editor — restore the filter and select the
+    /// note that was being edited.
+    fn show_list_with(&mut self, back: Option<(&str, NoteId)>) {
         let ctx = monitor::pointer_context();
         let dpi = ctx.dpi;
         let r = place_window(
@@ -956,9 +992,18 @@ impl App {
             (unsafe { IsWindowVisible(h).as_bool() }) && self.vdesk.is_on_current(h)
         });
         if let Some(k) = existing {
-            listwin::show_at(win::hwnd(k), r);
+            let h = win::hwnd(k);
+            if let Some((filter, id)) = back {
+                listwin::set_filter(h, filter);
+                self.refresh_list(h);
+                listwin::select_only(h, id);
+            }
+            listwin::show_at(h, r);
             self.log_visible();
-            listwin::focus(win::hwnd(k));
+            listwin::focus(h);
+            if back.is_some() {
+                listwin::focus_list(h);
+            }
             return;
         }
         let Some(h) = self.spare_list.take().or_else(listwin::create) else {
@@ -969,10 +1014,19 @@ impl App {
         let ui = self.fonts.get(1, dpi, &self.config);
         let bold = self.fonts.get(2, dpi, &self.config);
         listwin::set_fonts(h, ui, bold);
+        if let Some((filter, _)) = back {
+            listwin::set_filter(h, filter);
+        }
         self.refresh_list(h);
+        if let Some((_, id)) = back {
+            listwin::select_only(h, id);
+        }
         listwin::show_at(h, r);
         self.log_visible();
         listwin::focus(h);
+        if back.is_some() {
+            listwin::focus_list(h);
+        }
         if unsafe { GetDpiForWindow(h) } != dpi {
             self.apply_fonts(h);
         }
