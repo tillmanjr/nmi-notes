@@ -225,3 +225,25 @@ Single crate `nmi-notes`:
 - `src/app.rs` — wires commands to store and UI.
 - `src/config.rs` — TOML config load/defaults.
 - `src/main.rs` — startup, single instance, message loop.
+
+## Implementation Notes (v1 build, 2026-10-30)
+
+Decisions made during the build that refine the design above:
+
+- **Current note in the list** is bold, starred, and has a pale-yellow row
+  highlight instead of a separator line.
+- **Editor size** is remembered for the session only (not persisted).
+- **Pre-warmed spares**: one hidden editor *and* one hidden list window are
+  created at startup and after each use, shown once while DWM-cloaked to pay
+  first-show costs up front.
+- **Show then activate**: windows are shown with `SWP_NOACTIVATE` first, then
+  activated. Measured (release, this machine): on screen in ~9–19 ms from the
+  hotkey; activation (`SetForegroundWindow`) adds ~30–50 ms waiting on the
+  previously active app, which is outside our process. The 50 ms budget is
+  applied to "on screen".
+- **Remote control**: `--cmd new|append|show|copy|list` and `--exit` forward
+  to the running instance (scripting, and used for smoke tests).
+- **`--selftest`** exercises the real RichEdit against the store (offsets,
+  `\r`↔`\n`, caret/selection/tail behavior).
+- **Font fallback**: the configured face is checked with `GetTextFaceW`;
+  Consolas is used if it isn't installed.

@@ -46,6 +46,11 @@ impl Writer {
         Writer { tx, handle: Some(handle) }
     }
 
+    /// A sender usable from other threads (e.g. the panic hook).
+    pub fn sender(&self) -> Sender<Job> {
+        self.tx.clone()
+    }
+
     pub fn send(&self, job: Job) {
         let _ = self.tx.send(job);
     }

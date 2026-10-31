@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::model::store::{Note, NoteId};
 
-pub use writer::{Job, Writer};
+pub use writer::{Job, Status, Writer};
 
 const CURRENT_KEY: &str = "current_note_id";
 const BACKUPS_KEPT: usize = 7;

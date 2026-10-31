@@ -96,6 +96,15 @@ pub fn utf16_to_byte(s: &str, off: usize) -> Option<usize> {
     (units == off).then_some(s.len())
 }
 
+/// Compact count: `532`, `12.4k`, `3.1M`.
+pub fn compact_count(n: usize) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
+}
+
 /// Short human description of how long ago `then_ms` was.
 pub fn relative_time(now_ms: i64, then_ms: i64) -> String {
     let secs = (now_ms - then_ms).max(0) / 1000;
@@ -160,6 +169,13 @@ mod tests {
         assert_eq!(line_count(""), 0);
         assert_eq!(line_count("a"), 1);
         assert_eq!(line_count("a\nb\n"), 2);
+    }
+
+    #[test]
+    fn compact_counts() {
+        assert_eq!(compact_count(532), "532");
+        assert_eq!(compact_count(12_400), "12.4k");
+        assert_eq!(compact_count(3_100_000), "3.1M");
     }
 
     #[test]
