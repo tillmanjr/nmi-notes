@@ -31,7 +31,7 @@ impl Default for Hotkeys {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Editor font face; falls back to Consolas if missing.
+    /// Editor font face; Fira Mono is built in. Falls back to Consolas if missing.
     pub font: String,
     /// Editor font size in points.
     pub font_size: i32,
@@ -42,7 +42,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { font: "Cascadia Mono".into(), font_size: 11, start_with_windows: false, hotkeys: Hotkeys::default() }
+        Config { font: "Fira Mono".into(), font_size: 11, start_with_windows: false, hotkeys: Hotkeys::default() }
     }
 }
 

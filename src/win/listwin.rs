@@ -9,34 +9,39 @@ use std::collections::HashMap;
 use nmi_notes::model::placement::Rect;
 use nmi_notes::model::store::NoteId;
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{InvalidateRect, SelectObject, HFONT, HGDIOBJ};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, EndPaint, FrameRect, InvalidateRect, SelectObject, SetBkColor, SetTextColor, HDC, HFONT, HGDIOBJ,
+    PAINTSTRUCT,
+};
 use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, LIST_VIEW_ITEM_STATE_FLAGS,
     LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_PARAM, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
     LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED, LVN_GETINFOTIPW,
     LVN_ITEMACTIVATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_REPORT, LVS_SHOWSELALWAYS,
-    NMHDR, NMLVCUSTOMDRAW, NMLVGETINFOTIPW, NM_CUSTOMDRAW, WC_LISTVIEWW, EM_SETSEL,
+    NMCUSTOMDRAW, NMHDR, NMLVCUSTOMDRAW, NMLVGETINFOTIPW, NM_CUSTOMDRAW, WC_LISTVIEWW, EM_SETSEL, LVM_GETHEADER, LVM_GETTOOLTIPS,
+    LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, IsIconic,
     LoadCursorW, MoveWindow, RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow,
     EN_CHANGE, ES_AUTOHSCROLL, HMENU, HWND_TOP, IDC_ARROW, MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SW_RESTORE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
-    WM_GETMINMAXINFO, WM_NOTIFY, WM_SETFOCUS, WM_SETREDRAW, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    WM_GETMINMAXINFO, WM_NOTIFY, WM_SETFOCUS, WM_SETREDRAW, WM_SIZE, WNDCLASSEXW, WS_CHILD, CS_HREDRAW, CS_VREDRAW,
+    WM_CTLCOLOREDIT, WM_PAINT,
     WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
-use super::{hinstance, hiword, icon, key, loword, scale, set_font, wide};
+use super::{hinstance, hiword, icon, key, loword, scale, set_font, theme, wide};
 use crate::app::{post, Action};
 
 pub const CLASS: PCWSTR = w!("NmiList");
 const ID_FILTER: i32 = 200;
 const ID_LIST: i32 = 201;
 const EM_SETCUEBANNER: u32 = 0x1501;
-const CURRENT_BG: COLORREF = COLORREF(0x00_C8_F4_FF); // BGR pale yellow
 
 #[derive(Clone)]
 pub struct Row {
@@ -62,12 +67,13 @@ pub fn register_class() {
     unsafe {
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance(),
             hIcon: icon::app_icon(),
             hIconSm: icon::app_icon(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH((15 + 1) as *mut _), // COLOR_BTNFACE + 1
+            hbrBackground: theme::pad_brush(),
             lpszClassName: CLASS,
             ..Default::default()
         };
@@ -100,6 +106,7 @@ pub fn create() -> Option<HWND> {
             None,
         )
         .ok()?;
+        theme::dark_title(h);
         let f = CreateWindowExW(
             WS_EX_CLIENTEDGE,
             w!("EDIT"),
@@ -116,12 +123,13 @@ pub fn create() -> Option<HWND> {
         )
         .ok()?;
         let cue = wide("Filter notes…");
+        theme::dark_control(f, w!("DarkMode_CFD"));
         SendMessageW(f, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize)));
         let lv = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             WC_LISTVIEWW,
             PCWSTR::null(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | WINDOW_STYLE(LVS_REPORT | LVS_SHOWSELALWAYS),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(LVS_REPORT | LVS_SHOWSELALWAYS),
             0,
             0,
             10,
@@ -134,6 +142,16 @@ pub fn create() -> Option<HWND> {
         .ok()?;
         let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP;
         SendMessageW(lv, LVM_SETEXTENDEDLISTVIEWSTYLE, Some(WPARAM(ex as usize)), Some(LPARAM(ex as isize)));
+        theme::dark_control(lv, w!("DarkMode_Explorer"));
+        for (m, c) in [(LVM_SETBKCOLOR, theme::NOTE_BG), (LVM_SETTEXTBKCOLOR, theme::NOTE_BG), (LVM_SETTEXTCOLOR, theme::NOTE_FG)] {
+            SendMessageW(lv, m, Some(WPARAM(0)), Some(LPARAM(c.0 as isize)));
+        }
+        let header = HWND(SendMessageW(lv, LVM_GETHEADER, None, None).0 as *mut _);
+        theme::dark_control(header, w!("DarkMode_ItemsView"));
+        // The dark header theme leaves its text dark; recolor it.
+        let _ = SetWindowSubclass(lv, Some(list_subclass), 1, 0);
+        let tips = HWND(SendMessageW(lv, LVM_GETTOOLTIPS, None, None).0 as *mut _);
+        theme::dark_control(tips, w!("DarkMode_Explorer"));
         for (i, (title, width)) in [("★", 28), ("Note", 360), ("Updated", 90), ("Size", 60)].iter().enumerate() {
             let t = wide(title);
             let col = LVCOLUMNW {
@@ -308,7 +326,7 @@ fn layout(h: HWND) {
     unsafe {
         let _ = GetClientRect(h, &mut rc);
         let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(h).max(96);
-        let pad = scale(8, dpi);
+        let pad = scale(12, dpi);
         let fh = scale(26, dpi);
         let width = rc.right - 2 * pad;
         let _ = MoveWindow(filter(h), pad, pad, width, fh, true);
@@ -321,6 +339,25 @@ fn layout(h: HWND) {
             SendMessageW(lv, LVM_SETCOLUMNWIDTH, Some(WPARAM(i)), Some(LPARAM(*w as isize)));
         }
     }
+}
+
+/// ListView subclass: header custom draw arrives here (the header's parent).
+unsafe extern "system" fn list_subclass(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    if msg == WM_NOTIFY {
+        let hdr = &*(lp.0 as *const NMHDR);
+        let header = HWND(SendMessageW(h, LVM_GETHEADER, None, None).0 as *mut _);
+        if hdr.hwndFrom == header && hdr.code == NM_CUSTOMDRAW {
+            let cd = &*(lp.0 as *const NMCUSTOMDRAW);
+            if cd.dwDrawStage == CDDS_PREPAINT {
+                return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
+            }
+            if cd.dwDrawStage == CDDS_ITEMPREPAINT {
+                SetTextColor(cd.hdc, theme::DIM_FG);
+                return LRESULT(CDRF_DODEFAULT as isize);
+            }
+        }
+    }
+    DefSubclassProc(h, msg, wp, lp)
 }
 
 unsafe fn on_notify(h: HWND, ptr: *mut NMHDR) -> Option<LRESULT> {
@@ -350,7 +387,8 @@ unsafe fn on_notify(h: HWND, ptr: *mut NMHDR) -> Option<LRESULT> {
                     if !bold.is_invalid() {
                         SelectObject(cd.nmcd.hdc, HGDIOBJ(bold.0));
                     }
-                    cd.clrTextBk = CURRENT_BG;
+                    cd.clrTextBk = theme::CURRENT_BG;
+                    cd.clrText = theme::CURRENT_FG;
                     return Some(LRESULT(CDRF_NEWFONT as isize));
                 }
             }
@@ -380,6 +418,26 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_SETFOCUS => {
             let _ = SetFocus(Some(filter(h)));
             LRESULT(0)
+        }
+        WM_PAINT => {
+            // The class brush fills the padding; add a hairline around the list.
+            let mut ps = PAINTSTRUCT::default();
+            let dc = BeginPaint(h, &mut ps);
+            let mut r = RECT::default();
+            let lv = list(h);
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(lv, &mut r);
+            let mut pts = [POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom }];
+            windows::Win32::Graphics::Gdi::MapWindowPoints(None, Some(h), &mut pts);
+            let edge = RECT { left: pts[0].x - 1, top: pts[0].y - 1, right: pts[1].x + 1, bottom: pts[1].y + 1 };
+            FrameRect(dc, &edge, theme::edge_brush());
+            let _ = EndPaint(h, &ps);
+            LRESULT(0)
+        }
+        WM_CTLCOLOREDIT => {
+            let dc = HDC(wp.0 as *mut _);
+            SetTextColor(dc, theme::NOTE_FG);
+            SetBkColor(dc, theme::NOTE_BG);
+            LRESULT(theme::note_brush().0 as isize)
         }
         WM_COMMAND => {
             if loword(wp.0) as i32 == ID_FILTER && hiword(wp.0) == EN_CHANGE {

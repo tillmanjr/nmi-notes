@@ -48,6 +48,7 @@ fn main() {
         };
         let _ = InitCommonControlsEx(&icc);
     }
+    win::theme::init();
 
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         // Release builds are GUI-subsystem: borrow the shell's console unless

@@ -13,6 +13,7 @@ pub mod logging;
 pub mod monitor;
 pub mod timefmt;
 pub mod toast;
+pub mod theme;
 pub mod tray;
 pub mod vdesktop;
 

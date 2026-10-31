@@ -18,7 +18,8 @@ In: tray-resident app, five global hotkey commands, SQLite storage, editor
 windows, note list/picker, soft delete, toasts.
 
 Out (later): titles, note lifetimes/expiry, export to files, images/rich
-content, dark mode, cross-machine sync.
+content, cross-machine sync. (Dark mode was added 2026-10-31; see
+Implementation Notes.)
 
 ## Platform & Toolkit
 
@@ -153,8 +154,8 @@ folder", "Exit". Double-click opens Note List. Re-add icon on
 
 ## Editor Window
 
-- Plain-text RichEdit, raised text limit, font from config (default Cascadia
-  Mono, fallback Consolas).
+- Plain-text RichEdit, raised text limit, font from config (default Fira Mono,
+  embedded in the exe; fallback Consolas).
 - Caption: first line of note (+ " ★" if Current). Status strip: `★ Current`
   when applicable, updated time, sync state.
 - Keys: `Esc` / `Ctrl+W` close (flush first); `Ctrl+Shift+Enter` make
@@ -247,3 +248,18 @@ Decisions made during the build that refine the design above:
   `\r`↔`\n`, caret/selection/tail behavior).
 - **Font fallback**: the configured face is checked with `GetTextFaceW`;
   Consolas is used if it isn't installed.
+
+### Dark mode (2026-10-31)
+
+- Always dark (no light theme). Palette and helpers live in `src/win/theme.rs`.
+- Title bars: `DWMWA_USE_IMMERSIVE_DARK_MODE`. Scrollbars, tray menu, list
+  header and tooltips: uxtheme `SetPreferredAppMode(ForceDark)` (ordinal 135)
+  plus `DarkMode_Explorer` / `DarkMode_CFD` / `DarkMode_ItemsView` visual
+  styles. The list header text is recolored via a ListView subclass (the dark
+  header theme leaves it dark).
+- Editor: note area (`#1B1C1F`) sits inside 12 px of lighter padding
+  (`#2C2E33`) with a 1 px edge (`#454951`); text inset 10 px horizontally and
+  8 px from the top; the status strip lives in the bottom padding.
+- Note font: Fira Mono Regular (SIL OFL 1.1, `assets/fonts/`), registered
+  process-private with `AddFontMemResourceEx`; `font` in config.toml still
+  overrides it.

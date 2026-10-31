@@ -44,6 +44,13 @@ round-trip, which briefly overwrites the clipboard).
       `Ctrl+Z` in the list restores them.
 - [ ] Hover a row: tooltip shows the absolute update time.
 
+## Look
+
+- [ ] Editor, list, title bars, scrollbars, tray menu and tooltips are dark.
+- [ ] Editor text is Fira Mono (`0O 1lI` clearly distinct) inside a darker
+      note area with lighter padding and a thin edge; status strip below it.
+- [ ] List header text is readable; Current row is gold and bold.
+
 ## Robustness
 
 - [ ] Restart Explorer (`taskkill /f /im explorer.exe && start explorer`):

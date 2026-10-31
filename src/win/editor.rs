@@ -10,26 +10,26 @@ use nmi_notes::model::diff::shift_offset;
 use nmi_notes::model::placement::Rect;
 use windows::core::{w, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::HFONT;
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, FrameRect, SetBkColor, SetTextColor, HDC, HFONT, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::LoadLibraryW;
 use windows::Win32::UI::Controls::RichEdit::{
-    CHARRANGE, EM_EXGETSEL, EM_EXLIMITTEXT, EM_EXSETSEL, EM_GETSCROLLPOS, EM_GETTEXTEX, EM_GETTEXTLENGTHEX,
+    CHARFORMAT2W, CFM_COLOR, CHARRANGE, EM_EXGETSEL, EM_SETBKGNDCOLOR, EM_SETCHARFORMAT, SCF_ALL, SCF_DEFAULT, EM_EXLIMITTEXT, EM_EXSETSEL, EM_GETSCROLLPOS, EM_GETTEXTEX, EM_GETTEXTLENGTHEX,
     EM_SETEVENTMASK, EM_SETSCROLLPOS, EM_SETTEXTMODE, ENM_CHANGE, GETTEXTEX, GETTEXTLENGTHEX, GTL_NUMCHARS,
     GTL_PRECISE, GT_DEFAULT, MSFTEDIT_CLASS, TM_MULTILEVELUNDO, TM_PLAINTEXT,
 };
-use windows::Win32::System::SystemServices::{SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX};
-use windows::Win32::UI::Controls::{EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETMARGINS};
+use windows::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX};
+use windows::Win32::UI::Controls::{EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETRECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetDlgItem, GetWindowRect, IsIconic, KillTimer, LoadCursorW,
     MoveWindow, RegisterClassExW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW,
-    ShowWindow, EN_CHANGE, EN_KILLFOCUS,
+    ShowWindow, CS_HREDRAW, CS_VREDRAW, EN_CHANGE, EN_KILLFOCUS, WM_CTLCOLORSTATIC, WM_PAINT,
     ES_AUTOVSCROLL, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, HMENU, HWND_TOP, IDC_ARROW, MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_GETMINMAXINFO, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_TIMER,
     WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
 
-use super::{hinstance, hiword, icon, key, loword, scale, set_font, wide};
+use super::{hinstance, hiword, icon, key, loword, scale, set_font, theme, wide};
 use crate::app::{post, Action};
 
 pub const CLASS: PCWSTR = w!("NmiEditor");
@@ -65,11 +65,13 @@ pub fn register_class() {
         let _ = LoadLibraryW(w!("Msftedit.dll"));
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance(),
             hIcon: icon::app_icon(),
             hIconSm: icon::app_icon(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: theme::pad_brush(),
             lpszClassName: CLASS,
             ..Default::default()
         };
@@ -116,6 +118,7 @@ pub fn create() -> Option<HWND> {
             None,
         )
         .ok()?;
+        theme::dark_title(h);
         let style = WS_CHILD
             | WS_VISIBLE
             | WS_VSCROLL
@@ -138,11 +141,13 @@ pub fn create() -> Option<HWND> {
         SendMessageW(re, EM_SETTEXTMODE, Some(WPARAM((TM_PLAINTEXT.0 | TM_MULTILEVELUNDO.0) as usize)), None);
         SendMessageW(re, EM_EXLIMITTEXT, Some(WPARAM(0)), Some(LPARAM(0x7FFF_FFFE)));
         SendMessageW(re, EM_SETEVENTMASK, Some(WPARAM(0)), Some(LPARAM(ENM_CHANGE as isize)));
+        SendMessageW(re, EM_SETBKGNDCOLOR, Some(WPARAM(0)), Some(LPARAM(theme::NOTE_BG.0 as isize)));
+        theme::dark_control(re, w!("DarkMode_Explorer")); // scrollbar
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("STATIC"),
             PCWSTR::null(),
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SS_LEFT.0 | SS_NOPREFIX.0 | SS_ENDELLIPSIS.0),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SS_LEFT.0 | SS_NOPREFIX.0 | SS_ENDELLIPSIS.0 | SS_CENTERIMAGE.0),
             0,
             0,
             10,
@@ -165,14 +170,24 @@ fn status(h: HWND) -> HWND {
     unsafe { GetDlgItem(Some(h), ID_STATUS).unwrap_or_default() }
 }
 
-pub fn set_fonts(h: HWND, text_font: HFONT, ui_font: HFONT, dpi: u32) {
+pub fn set_fonts(h: HWND, text_font: HFONT, ui_font: HFONT, _dpi: u32) {
     let re = edit(h);
     set_font(re, text_font);
     set_font(status(h), ui_font);
-    let m = scale(6, dpi) as usize;
+    // Text color after the font (WM_SETFONT resets the default format).
+    let cf = CHARFORMAT2W {
+        Base: windows::Win32::UI::Controls::RichEdit::CHARFORMATW {
+            cbSize: std::mem::size_of::<CHARFORMAT2W>() as u32,
+            dwMask: CFM_COLOR,
+            crTextColor: theme::NOTE_FG,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     unsafe {
-        // EC_LEFTMARGIN | EC_RIGHTMARGIN
-        SendMessageW(re, EM_SETMARGINS, Some(WPARAM(3)), Some(LPARAM(((m << 16) | m) as isize)));
+        for scope in [SCF_DEFAULT, SCF_ALL] {
+            SendMessageW(re, EM_SETCHARFORMAT, Some(WPARAM(scope as usize)), Some(LPARAM(&cf as *const _ as isize)));
+        }
     }
     layout(h);
 }
@@ -303,7 +318,7 @@ pub fn set_caption(h: HWND, text: &str) {
 }
 
 pub fn set_status(h: HWND, text: &str) {
-    let w = wide(&format!("  {text}"));
+    let w = wide(text);
     unsafe {
         let _ = SetWindowTextW(status(h), PCWSTR(w.as_ptr()));
     }
@@ -349,14 +364,42 @@ pub fn size(h: HWND) -> (i32, i32) {
     (r.right - r.left, r.bottom - r.top)
 }
 
-fn layout(h: HWND) {
+/// Padding between the window border and the note area; the status strip
+/// sits in the bottom padding.
+const PAD: i32 = 12;
+const STATUS_H: i32 = 26;
+/// Inset of the text inside the note area.
+const TEXT_INSET_X: i32 = 10;
+const TEXT_INSET_Y: i32 = 8;
+
+/// Note area (RichEdit) in client coordinates.
+fn note_rect(h: HWND) -> RECT {
     let mut rc = RECT::default();
     unsafe {
         let _ = GetClientRect(h, &mut rc);
-        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(h).max(96);
-        let sh = scale(22, dpi);
-        let _ = MoveWindow(edit(h), 0, 0, rc.right, (rc.bottom - sh).max(0), true);
-        let _ = MoveWindow(status(h), 0, rc.bottom - sh, rc.right, sh, true);
+    }
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(h) }.max(96);
+    let pad = scale(PAD, dpi);
+    RECT {
+        left: pad,
+        top: pad,
+        right: (rc.right - pad).max(pad),
+        bottom: (rc.bottom - scale(STATUS_H, dpi)).max(pad),
+    }
+}
+
+fn layout(h: HWND) {
+    let n = note_rect(h);
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(h) }.max(96);
+    let re = edit(h);
+    unsafe {
+        let _ = MoveWindow(re, n.left, n.top, n.right - n.left, n.bottom - n.top, true);
+        let mut rc = RECT::default();
+        let _ = GetClientRect(re, &mut rc);
+        let (ix, iy) = (scale(TEXT_INSET_X, dpi), scale(TEXT_INSET_Y, dpi));
+        let fmt = RECT { left: ix, top: iy, right: (rc.right - ix).max(ix), bottom: (rc.bottom - iy / 2).max(iy) };
+        SendMessageW(re, EM_SETRECT, Some(WPARAM(0)), Some(LPARAM(&fmt as *const _ as isize)));
+        let _ = MoveWindow(status(h), n.left, n.bottom, n.right - n.left, scale(STATUS_H, dpi), true);
     }
 }
 
@@ -369,6 +412,22 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_SETFOCUS => {
             let _ = SetFocus(Some(edit(h)));
             LRESULT(0)
+        }
+        WM_PAINT => {
+            // The class brush fills the padding; add a hairline around the note area.
+            let mut ps = PAINTSTRUCT::default();
+            let dc = BeginPaint(h, &mut ps);
+            let n = note_rect(h);
+            let edge = RECT { left: n.left - 1, top: n.top - 1, right: n.right + 1, bottom: n.bottom + 1 };
+            FrameRect(dc, &edge, theme::edge_brush());
+            let _ = EndPaint(h, &ps);
+            LRESULT(0)
+        }
+        WM_CTLCOLORSTATIC => {
+            let dc = HDC(wp.0 as *mut _);
+            SetTextColor(dc, theme::DIM_FG);
+            SetBkColor(dc, theme::PAD_BG);
+            LRESULT(theme::pad_brush().0 as isize)
         }
         WM_COMMAND => {
             let (id, code) = (loword(wp.0) as i32, hiword(wp.0));

@@ -34,7 +34,8 @@ the same).
 - Notes: `%LOCALAPPDATA%\nmi-notes\notes.db` (SQLite, WAL)
 - Daily backups (7 kept): `%LOCALAPPDATA%\nmi-notes\backups\`
 - Log: `%LOCALAPPDATA%\nmi-notes\logs\nmi-notes.log`
-- Config: `%APPDATA%\nmi-notes\config.toml` (hotkeys, font, start with Windows)
+- Config: `%APPDATA%\nmi-notes\config.toml` (hotkeys, font, start with Windows).
+  The note font defaults to Fira Mono, which is built into the exe.
 
 ## Docs
 
@@ -50,3 +51,8 @@ terms of the GNU Affero General Public License as published by the Free
 Software Foundation, either version 3 of the License, or (at your option) any
 later version. See [LICENSE](LICENSE) for the full text.
 (SPDX: `AGPL-3.0-or-later`)
+
+The bundled Fira Mono font (`assets/fonts/FiraMono-Regular.ttf`, embedded in
+the exe) is Copyright (c) 2012-2013 The Mozilla Corporation and Telefonica
+S.A., licensed under the SIL Open Font License 1.1; see
+[assets/fonts/OFL.txt](assets/fonts/OFL.txt).
