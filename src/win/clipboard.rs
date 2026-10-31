@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Clipboard read (text, else file-drop list) and write (CRLF text).
 
 use std::time::Duration;

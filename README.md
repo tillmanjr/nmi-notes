@@ -26,6 +26,8 @@ target\release\nmi-notes.exe
 
 Scripting (from another tool, e.g. AutoHotkey or a Stream Deck):
 `nmi-notes.exe --cmd new|append|show|copy|list`, `nmi-notes.exe --exit`.
+`nmi-notes.exe --version` prints version and license (tray menu → About shows
+the same).
 
 ## Files
 
@@ -38,3 +40,13 @@ Scripting (from another tool, e.g. AutoHotkey or a Stream Deck):
 
 - Design: `docs/superpowers/specs/2026-10-30-nmi-notes-design.md`
 - Manual test checklist: `docs/manual-test.md`
+
+## License
+
+Copyright (C) 2026 Tillman O Dickson, Jr. <tillmanjr@gmail.com>
+
+nmi-notes is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See [LICENSE](LICENSE) for the full text.
+(SPDX: `AGPL-3.0-or-later`)

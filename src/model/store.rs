@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! The flux store: sole owner of note state. Ops go in, `Change`s come out.
 //! No I/O and no Win32 here; the app layer persists and routes changes.
 

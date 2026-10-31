@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! App icon drawn in code (a yellow sticky note), so no resource compiler
 //! is needed.
 

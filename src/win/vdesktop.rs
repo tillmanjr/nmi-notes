@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Virtual desktop awareness via the documented IVirtualDesktopManager.
 
 use windows::Win32::Foundation::HWND;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Minimal append-only file log in `%LOCALAPPDATA%\nmi-notes\logs`.
 
 use std::io::Write;

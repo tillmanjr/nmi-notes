@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Note List window: filter box over a report-mode ListView. Holds only the
 //! rows it was last given (for custom draw / tooltips); the app owns data.
 

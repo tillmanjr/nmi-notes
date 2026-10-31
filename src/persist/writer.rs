@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Writer thread: coalesces jobs, writes them in one transaction, retries on
 //! failure, and dumps unwritten notes to a recovery file if shut down while
 //! failing.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Single-range diff over UTF-16 text, used to turn an editor's full text
 //! into one `Edit` op, and to keep carets stable when remote ops arrive.
 

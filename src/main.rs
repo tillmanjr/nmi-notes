@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
@@ -48,6 +49,18 @@ fn main() {
         let _ = InitCommonControlsEx(&icc);
     }
 
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        // Release builds are GUI-subsystem: borrow the shell's console unless
+        // stdout is already redirected.
+        unsafe {
+            use windows::Win32::System::Console::{AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE};
+            if GetStdHandle(STD_OUTPUT_HANDLE).map_or(true, |h| h.is_invalid() || h.0.is_null()) {
+                let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+        }
+        println!("{}", nmi_notes::about::text());
+        return;
+    }
     if std::env::args().any(|a| a == "--selftest") {
         std::process::exit(selftest::run());
     }
@@ -60,7 +73,7 @@ fn main() {
         match args.get(i + 1).and_then(|n| Command::from_name(n)) {
             Some(c) => Some(c.id() as usize),
             None => {
-                eprintln!("usage: nmi-notes [--cmd new|append|show|copy|list] [--exit]");
+                eprintln!("usage: nmi-notes [--cmd new|append|show|copy|list] [--exit] [--version]");
                 std::process::exit(2);
             }
         }

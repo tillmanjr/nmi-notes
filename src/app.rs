@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! App: owns the Store, writer, and window bookkeeping. Window procedures
 //! `post` actions; `pump` runs them whenever the app isn't already borrowed,
 //! so Win32 re-entrancy (messages sent while we're mid-action) is safe.
@@ -24,7 +26,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_DE
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, GetAncestor, IsWindow, IsWindowVisible, MessageBoxW, PostMessageW, PostQuitMessage, SetTimer,
-    GA_ROOT, MB_ICONERROR, MB_ICONWARNING, MB_OK, MSG, SW_SHOWNORMAL, WM_APP, WM_KEYDOWN,
+    GA_ROOT, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MSG, SW_SHOWNORMAL, WM_APP, WM_KEYDOWN,
 };
 
 use crate::log;
@@ -534,6 +536,7 @@ impl App {
     fn tray_menu(&mut self) {
         const OPEN_CONFIG: u32 = 100;
         const OPEN_DATA: u32 = 101;
+        const ABOUT: u32 = 102;
         const EXIT: u32 = 199;
         let labels: Vec<(u32, String)> = Command::ALL
             .iter()
@@ -543,12 +546,17 @@ impl App {
         items.push(None);
         items.push(Some((OPEN_CONFIG, "Open config")));
         items.push(Some((OPEN_DATA, "Open data folder")));
+        items.push(Some((ABOUT, "About")));
         items.push(None);
         items.push(Some((EXIT, "Exit")));
         let Some(choice) = self.tray.as_ref().and_then(|t| t.show_menu(&items)) else { return };
         match choice {
             OPEN_CONFIG => shell_open("notepad.exe", Some(&self.paths.config.display().to_string())),
             OPEN_DATA => shell_open(&self.paths.data_dir.display().to_string(), None),
+            // Own thread: a modal box here would hold the app borrow and stall hotkeys.
+            ABOUT => {
+                std::thread::spawn(|| message_box(&nmi_notes::about::text(), MB_ICONINFORMATION));
+            }
             EXIT => post(Action::Exit),
             id => {
                 if let Some(c) = Command::from_id(id as i32) {

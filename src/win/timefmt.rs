@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Local-time formatting via Win32 (no date crate needed).
 
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};

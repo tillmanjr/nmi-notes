@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Which monitor the pointer is on, its work area, and its DPI.
 
 use nmi_notes::model::placement::{Point, Rect};

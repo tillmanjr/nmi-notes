@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! SQLite persistence. The writer thread owns the only connection after
 //! startup; `open` loads everything once on the UI thread.
 

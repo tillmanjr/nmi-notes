@@ -3,7 +3,9 @@ name = "nmi-notes"
 version = "0.1.0"
 edition = "2021"
 description = "Fast tray-resident note capture for Windows"
-license = "MIT"
+authors = ["Tillman O Dickson, Jr. <tillmanjr@gmail.com>"]
+license = "AGPL-3.0-or-later"
+readme = "README.md"
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -19,6 +21,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Console",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
@@ -35,6 +38,9 @@ features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]
+
+[build-dependencies]
+winresource = "0.1"
 
 [dev-dependencies]
 proptest = "1"

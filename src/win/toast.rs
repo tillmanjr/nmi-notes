@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Volume-flyout-style toast: bottom-center of the pointer's monitor,
 //! topmost, click-through, never activated. Self-contained (no app state).
 

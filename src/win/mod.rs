@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Win32 presentation layer. Window procedures never touch app state; they
 //! `crate::app::post` actions instead.
 

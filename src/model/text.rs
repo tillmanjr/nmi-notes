@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Text helpers shared by the store, clipboard, and UI layers.
 //!
 //! The store keeps `\n` line endings only. Offsets exchanged with the editor

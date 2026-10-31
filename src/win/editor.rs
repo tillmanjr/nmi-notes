@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Note editor window: a plain-text RichEdit plus a one-line status strip.
 //! Holds no note state; the app tracks which note each window presents.
 

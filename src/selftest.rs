@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! `nmi-notes --selftest`: exercises the real RichEdit control against the
 //! store to verify offsets, line endings, and caret preservation. Runs
 //! headless (windows are never shown). Prints results; exit code 0 = pass.

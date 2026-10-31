@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Notification-area icon and its context menu.
 
 use windows::Win32::Foundation::{HWND, POINT};

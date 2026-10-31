@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Start-with-Windows via the HKCU Run key.
 
 use windows::core::PCWSTR;

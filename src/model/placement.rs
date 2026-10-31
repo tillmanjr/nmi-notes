@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 //! Pure placement math for windows and toasts.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
