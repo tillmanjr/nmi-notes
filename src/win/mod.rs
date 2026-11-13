@@ -6,11 +6,14 @@
 pub mod autostart;
 pub mod clipboard;
 pub mod editor;
+pub mod help;
 pub mod hotkeys;
 pub mod icon;
 pub mod listwin;
 pub mod logging;
+pub mod menu;
 pub mod monitor;
+pub mod prompt;
 pub mod timefmt;
 pub mod toast;
 pub mod theme;

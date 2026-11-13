@@ -37,6 +37,9 @@ round-trip, which briefly overwrites the clipboard).
 - [ ] Open a note from a filtered list: status shows "Esc: back to list".
       `Esc` closes it and the list returns with the same filter and that note
       selected (focus in the rows). `Ctrl+W` / ✕ just close.
+- [ ] `Win+Alt+H`: hot-key popup centered on the pointer's monitor, listing
+      the configured bindings. `Esc`, a click on it, or a click elsewhere
+      closes it.
 - [ ] `Win+Alt+L`: list near pointer, filter focused, Current pinned top in
       bold with ★ and highlight; others newest first.
 - [ ] Type in filter: rows filter live (matches anywhere in note text).
@@ -46,6 +49,28 @@ round-trip, which briefly overwrites the clipboard).
 - [ ] `Del` deletes selected (toast), open editors for them close;
       `Ctrl+Z` in the list restores them.
 - [ ] Hover a row: tooltip shows the absolute update time.
+
+## Protect and groups
+
+- [ ] Editor: click **Protect** (box or label): it ticks, 🔒 appears in the
+      list, and focus returns to the note text. `Del` in the list on it toasts
+      "Protected — not deleted". With a mix selected, only the unprotected
+      notes are deleted and the toast says how many were kept.
+- [ ] List: select notes, right-click → **Add to group → New group…**, enter a
+      name: the group is created, the notes join it, the Groups column shows
+      it, and focus is back on the rows.
+- [ ] Reusing a name with different case (`work` vs `Work`) keeps the prompt
+      open with "A group named “Work” already exists". `Esc` cancels.
+- [ ] Group dropdown: choosing a group limits the rows and the title reads
+      "Notes in “…” (n of N)". The text filter still works within it.
+- [ ] Editor **Groups ▾**: memberships are ticked; ticking or unticking one
+      updates the button and the list.
+- [ ] With a group chosen in the list, the menu can **Rename** it (name
+      updates everywhere) or **Delete** it (its notes stay; dropdown resets to
+      All notes).
+- [ ] Restart the app: protection, groups and memberships are still there.
+- [ ] Open the list from an editor with `Esc` and the group filter is the
+      same as when the note was opened.
 
 ## Look
 

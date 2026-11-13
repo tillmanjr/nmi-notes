@@ -7,11 +7,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use nmi_notes::model::placement::Rect;
-use nmi_notes::model::store::NoteId;
+use nmi_notes::model::store::{GroupId, NoteId};
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, FrameRect, InvalidateRect, SelectObject, SetBkColor, SetTextColor, HDC, HFONT, HGDIOBJ,
+    BeginPaint, ClientToScreen, EndPaint, FrameRect, InvalidateRect, SelectObject, SetBkColor, SetTextColor, HDC, HFONT, HGDIOBJ,
     PAINTSTRUCT,
 };
 use windows::Win32::UI::Controls::{
@@ -21,7 +21,7 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED, LVN_GETINFOTIPW,
     LVN_ITEMACTIVATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_REPORT, LVS_SHOWSELALWAYS,
     NMCUSTOMDRAW, NMHDR, NMLVCUSTOMDRAW, NMLVGETINFOTIPW, NM_CUSTOMDRAW, WC_LISTVIEWW, EM_SETSEL, LVM_GETHEADER, LVM_GETTOOLTIPS,
-    LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR,
+    LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR, LVM_GETITEMRECT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
@@ -31,7 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EN_CHANGE, ES_AUTOHSCROLL, HMENU, HWND_TOP, IDC_ARROW, MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SW_RESTORE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED,
     WM_GETMINMAXINFO, WM_NOTIFY, WM_SETFOCUS, WM_SETREDRAW, WM_SIZE, WNDCLASSEXW, WS_CHILD, CS_HREDRAW, CS_VREDRAW,
-    WM_CTLCOLOREDIT, WM_PAINT,
+    WM_CTLCOLOREDIT, WM_PAINT, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT,
+    CB_SETCURSEL, WM_CONTEXTMENU, WM_CTLCOLORLISTBOX, WS_VSCROLL,
     WS_CLIPCHILDREN, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
@@ -41,13 +42,18 @@ use crate::app::{post, Action};
 pub const CLASS: PCWSTR = w!("NmiList");
 const ID_FILTER: i32 = 200;
 const ID_LIST: i32 = 201;
+const ID_GROUP: i32 = 202;
+/// Group dropdown width (96 DPI).
+const GROUP_W: i32 = 170;
 const EM_SETCUEBANNER: u32 = 0x1501;
 
 #[derive(Clone)]
 pub struct Row {
     pub id: NoteId,
     pub current: bool,
+    pub protected: bool,
     pub preview: String,
+    pub groups: String,
     pub updated_rel: String,
     pub updated_abs: String,
     pub size: String,
@@ -56,6 +62,8 @@ pub struct Row {
 struct Data {
     rows: Vec<Row>,
     bold: HFONT,
+    /// Group dropdown entries after "All notes".
+    groups: Vec<(GroupId, String)>,
 }
 
 thread_local! {
@@ -87,6 +95,10 @@ fn filter(h: HWND) -> HWND {
 
 fn list(h: HWND) -> HWND {
     unsafe { GetDlgItem(Some(h), ID_LIST).unwrap_or_default() }
+}
+
+fn group_box(h: HWND) -> HWND {
+    unsafe { GetDlgItem(Some(h), ID_GROUP).unwrap_or_default() }
 }
 
 pub fn create() -> Option<HWND> {
@@ -122,6 +134,25 @@ pub fn create() -> Option<HWND> {
             None,
         )
         .ok()?;
+        let cb = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("COMBOBOX"),
+            PCWSTR::null(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+            0,
+            0,
+            10,
+            10,
+            Some(h),
+            Some(HMENU(ID_GROUP as isize as *mut _)),
+            Some(hinstance()),
+            None,
+        )
+        .ok()?;
+        theme::dark_control(cb, w!("DarkMode_CFD"));
+        let all = wide("All notes");
+        SendMessageW(cb, CB_ADDSTRING, None, Some(LPARAM(all.as_ptr() as isize)));
+        SendMessageW(cb, CB_SETCURSEL, Some(WPARAM(0)), None);
         let cue = wide("Filter notes…");
         theme::dark_control(f, w!("DarkMode_CFD"));
         SendMessageW(f, EM_SETCUEBANNER, Some(WPARAM(1)), Some(LPARAM(cue.as_ptr() as isize)));
@@ -152,7 +183,7 @@ pub fn create() -> Option<HWND> {
         let _ = SetWindowSubclass(lv, Some(list_subclass), 1, 0);
         let tips = HWND(SendMessageW(lv, LVM_GETTOOLTIPS, None, None).0 as *mut _);
         theme::dark_control(tips, w!("DarkMode_Explorer"));
-        for (i, (title, width)) in [("★", 28), ("Note", 360), ("Updated", 90), ("Size", 60)].iter().enumerate() {
+        for (i, (title, width)) in [("★", 40), ("Note", 300), ("Groups", 120), ("Updated", 90), ("Size", 60)].iter().enumerate() {
             let t = wide(title);
             let col = LVCOLUMNW {
                 mask: LVCF_TEXT | LVCF_WIDTH,
@@ -162,13 +193,14 @@ pub fn create() -> Option<HWND> {
             };
             SendMessageW(lv, LVM_INSERTCOLUMNW, Some(WPARAM(i)), Some(LPARAM(&col as *const _ as isize)));
         }
-        LISTS.with(|l| l.borrow_mut().insert(key(h), Data { rows: Vec::new(), bold: HFONT::default() }));
+        LISTS.with(|l| l.borrow_mut().insert(key(h), Data { rows: Vec::new(), bold: HFONT::default(), groups: Vec::new() }));
         Some(h)
     }
 }
 
 pub fn set_fonts(h: HWND, ui: HFONT, bold: HFONT) {
     set_font(filter(h), ui);
+    set_font(group_box(h), ui);
     set_font(list(h), ui);
     LISTS.with(|l| {
         if let Some(d) = l.borrow_mut().get_mut(&key(h)) {
@@ -204,7 +236,8 @@ pub fn populate(h: HWND, new_rows: Vec<Row>) {
         SendMessageW(lv, WM_SETREDRAW, Some(WPARAM(0)), None);
         SendMessageW(lv, LVM_DELETEALLITEMS, None, None);
         for (i, row) in new_rows.iter().enumerate() {
-            let star = wide(if row.current { "★" } else { "" });
+            let marks = format!("{}{}", if row.current { "★" } else { "" }, if row.protected { "🔒" } else { "" });
+            let star = wide(&marks);
             let it = LVITEMW {
                 mask: LVIF_TEXT | LVIF_PARAM,
                 iItem: i as i32,
@@ -213,7 +246,7 @@ pub fn populate(h: HWND, new_rows: Vec<Row>) {
                 ..Default::default()
             };
             SendMessageW(lv, LVM_INSERTITEMW, Some(WPARAM(0)), Some(LPARAM(&it as *const _ as isize)));
-            for (sub, text) in [(1, &row.preview), (2, &row.updated_rel), (3, &row.size)] {
+            for (sub, text) in [(1, &row.preview), (2, &row.groups), (3, &row.updated_rel), (4, &row.size)] {
                 let t = wide(text);
                 let it = LVITEMW { iSubItem: sub, pszText: PWSTR(t.as_ptr() as *mut _), ..Default::default() };
                 SendMessageW(lv, LVM_SETITEMTEXTW, Some(WPARAM(i)), Some(LPARAM(&it as *const _ as isize)));
@@ -289,6 +322,85 @@ pub fn set_filter(h: HWND, text: &str) {
     }
 }
 
+/// Replaces the group dropdown entries (after "All notes"), keeping the
+/// selected group if it still exists.
+pub fn set_groups(h: HWND, groups: Vec<(GroupId, String)>) {
+    let same = LISTS.with(|l| l.borrow().get(&key(h)).is_some_and(|d| d.groups == groups));
+    if same {
+        return;
+    }
+    let selected = group_filter(h);
+    let cb = group_box(h);
+    unsafe {
+        SendMessageW(cb, CB_RESETCONTENT, None, None);
+        let all = wide("All notes");
+        SendMessageW(cb, CB_ADDSTRING, None, Some(LPARAM(all.as_ptr() as isize)));
+        for (_, name) in &groups {
+            let w = wide(name);
+            SendMessageW(cb, CB_ADDSTRING, None, Some(LPARAM(w.as_ptr() as isize)));
+        }
+    }
+    let index = selected.and_then(|g| groups.iter().position(|(id, _)| *id == g)).map_or(0, |i| i + 1);
+    LISTS.with(|l| {
+        if let Some(d) = l.borrow_mut().get_mut(&key(h)) {
+            d.groups = groups;
+        }
+    });
+    unsafe {
+        SendMessageW(cb, CB_SETCURSEL, Some(WPARAM(index)), None);
+    }
+}
+
+/// The group the list is limited to (None: all notes).
+pub fn group_filter(h: HWND) -> Option<GroupId> {
+    let i = unsafe { SendMessageW(group_box(h), CB_GETCURSEL, None, None).0 };
+    let i = usize::try_from(i).ok()?.checked_sub(1)?;
+    LISTS.with(|l| l.borrow().get(&key(h)).and_then(|d| d.groups.get(i).map(|(id, _)| *id)))
+}
+
+/// Limits the list to `group` (None: all notes); the app refreshes the rows.
+pub fn select_group(h: HWND, group: Option<GroupId>) {
+    let index = LISTS.with(|l| {
+        l.borrow()
+            .get(&key(h))
+            .and_then(|d| group.and_then(|g| d.groups.iter().position(|(id, _)| *id == g)))
+            .map_or(0, |i| i + 1)
+    });
+    unsafe {
+        SendMessageW(group_box(h), CB_SETCURSEL, Some(WPARAM(index)), None);
+    }
+}
+
+pub fn group_has_focus(h: HWND) -> bool {
+    unsafe { GetFocus() == group_box(h) }
+}
+
+pub fn focus_group(h: HWND) {
+    unsafe {
+        let _ = SetFocus(Some(group_box(h)));
+    }
+}
+
+/// Screen point at the bottom-left of the focused row's text.
+fn focused_row_anchor(h: HWND) -> Option<POINT> {
+    let lv = list(h);
+    let i = next_item(lv, -1, LVNI_FOCUSED);
+    if i < 0 {
+        return None;
+    }
+    // LVM_GETITEMRECT: rect.left carries the portion wanted (LVIR_LABEL = 2).
+    let mut r = RECT { left: 2, ..Default::default() };
+    let ok = unsafe { SendMessageW(lv, LVM_GETITEMRECT, Some(WPARAM(i as usize)), Some(LPARAM(&mut r as *mut _ as isize))).0 };
+    if ok == 0 {
+        return None;
+    }
+    let mut pt = POINT { x: r.left, y: r.bottom };
+    unsafe {
+        let _ = ClientToScreen(lv, &mut pt);
+    }
+    Some(pt)
+}
+
 /// Selects and focuses only the row for `id`, if present.
 pub fn select_only(h: HWND, id: NoteId) {
     let lv = list(h);
@@ -349,12 +461,17 @@ fn layout(h: HWND) {
         let pad = scale(12, dpi);
         let fh = scale(26, dpi);
         let width = rc.right - 2 * pad;
-        let _ = MoveWindow(filter(h), pad, pad, width, fh, true);
+        // Dropdown-list combos size their field to the font; the height
+        // given here is for the open list.
+        let gw = scale(GROUP_W, dpi);
+        let _ = MoveWindow(group_box(h), pad, pad, gw, scale(320, dpi), true);
+        let fx = pad + gw + scale(8, dpi);
+        let _ = MoveWindow(filter(h), fx, pad, (rc.right - pad - fx).max(0), fh, true);
         let top = 2 * pad + fh;
         let lv = list(h);
         let _ = MoveWindow(lv, pad, top, width, (rc.bottom - top - pad).max(0), true);
-        let fixed = scale(28 + 90 + 60, dpi) + scale(24, dpi);
-        let widths = [scale(28, dpi), (width - fixed).max(scale(120, dpi)), scale(90, dpi), scale(60, dpi)];
+        let fixed = scale(40 + 120 + 90 + 60, dpi) + scale(24, dpi);
+        let widths = [scale(40, dpi), (width - fixed).max(scale(120, dpi)), scale(120, dpi), scale(90, dpi), scale(60, dpi)];
         for (i, w) in widths.iter().enumerate() {
             SendMessageW(lv, LVM_SETCOLUMNWIDTH, Some(WPARAM(i)), Some(LPARAM(*w as isize)));
         }
@@ -453,16 +570,25 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = EndPaint(h, &ps);
             LRESULT(0)
         }
-        WM_CTLCOLOREDIT => {
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
             let dc = HDC(wp.0 as *mut _);
             SetTextColor(dc, theme::NOTE_FG);
             SetBkColor(dc, theme::NOTE_BG);
             LRESULT(theme::note_brush().0 as isize)
         }
         WM_COMMAND => {
-            if loword(wp.0) as i32 == ID_FILTER && hiword(wp.0) == EN_CHANGE {
+            let (id, code) = (loword(wp.0) as i32, hiword(wp.0));
+            if (id == ID_FILTER && code == EN_CHANGE) || (id == ID_GROUP && code == CBN_SELCHANGE) {
                 post(Action::ListFilter(key(h)));
             }
+            LRESULT(0)
+        }
+        WM_CONTEXTMENU => {
+            // lParam is -1/-1 when opened from the keyboard: anchor below the
+            // focused row instead of at the pointer.
+            let (x, y) = ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
+            let at = if x != -1 || y != -1 { Some(POINT { x, y }) } else { focused_row_anchor(h) };
+            post(Action::ListMenu(key(h), at));
             LRESULT(0)
         }
         WM_NOTIFY => match on_notify(h, lp.0 as *mut NMHDR) {

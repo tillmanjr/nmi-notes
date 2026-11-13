@@ -29,6 +29,8 @@ pub const DIM_FG: COLORREF = rgb(0x9A9EA6);
 /// Current-note row in the list.
 pub const CURRENT_BG: COLORREF = rgb(0x3B3420);
 pub const CURRENT_FG: COLORREF = rgb(0xFFDD55);
+/// Validation messages.
+pub const ERROR_FG: COLORREF = rgb(0xFF8A80);
 
 /// Face name of the embedded font.
 pub const NOTE_FONT: &str = "Fira Mono";

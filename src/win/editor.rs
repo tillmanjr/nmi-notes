@@ -17,13 +17,14 @@ use windows::Win32::UI::Controls::RichEdit::{
     EM_SETEVENTMASK, EM_SETSCROLLPOS, EM_SETTEXTMODE, ENM_CHANGE, GETTEXTEX, GETTEXTLENGTHEX, GTL_NUMCHARS,
     GTL_PRECISE, GT_DEFAULT, MSFTEDIT_CLASS, TM_MULTILEVELUNDO, TM_PLAINTEXT,
 };
-use windows::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX};
-use windows::Win32::UI::Controls::{EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETRECT};
+use windows::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX, SS_NOTIFY};
+use windows::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED, EM_EMPTYUNDOBUFFER, EM_REPLACESEL, EM_SCROLLCARET, EM_SETRECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetDlgItem, GetWindowRect, IsIconic, KillTimer, LoadCursorW,
     MoveWindow, RegisterClassExW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW,
-    ShowWindow, CS_HREDRAW, CS_VREDRAW, EN_CHANGE, EN_KILLFOCUS, WM_CTLCOLORSTATIC, WM_PAINT,
+    ShowWindow, BM_SETCHECK, BN_CLICKED, BS_CHECKBOX, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, EN_CHANGE, EN_KILLFOCUS,
+    STN_CLICKED, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_PAINT,
     ES_AUTOVSCROLL, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, HMENU, HWND_TOP, IDC_ARROW, MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_GETMINMAXINFO, WM_SETFOCUS, WM_SETTEXT, WM_SIZE, WM_TIMER,
     WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
@@ -35,6 +36,9 @@ use crate::app::{post, Action};
 pub const CLASS: PCWSTR = w!("NmiEditor");
 const ID_EDIT: i32 = 100;
 const ID_STATUS: i32 = 101;
+const ID_PROTECT: i32 = 102;
+const ID_PROTECT_LABEL: i32 = 103;
+const ID_GROUPS: i32 = 104;
 const TIMER_DEBOUNCE: usize = 1;
 pub const DEBOUNCE_MS: u32 = 250;
 const CP_UTF16: u32 = 1200;
@@ -158,6 +162,32 @@ pub fn create() -> Option<HWND> {
             None,
         )
         .ok()?;
+        // Protect: an unlabeled checkbox plus a clickable label (themed
+        // checkboxes ignore our text color in dark mode).
+        for (class, text, style, id) in [
+            (w!("BUTTON"), w!(""), WINDOW_STYLE(BS_CHECKBOX as u32), ID_PROTECT),
+            (w!("STATIC"), w!("Protect"), WINDOW_STYLE(SS_LEFT.0 | SS_NOPREFIX.0 | SS_CENTERIMAGE.0 | SS_NOTIFY.0), ID_PROTECT_LABEL),
+            (w!("BUTTON"), w!("Groups ▾"), WINDOW_STYLE(BS_PUSHBUTTON as u32), ID_GROUPS),
+        ] {
+            let c = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class,
+                text,
+                WS_CHILD | WS_VISIBLE | style,
+                0,
+                0,
+                10,
+                10,
+                Some(h),
+                Some(HMENU(id as isize as *mut _)),
+                Some(hinstance()),
+                None,
+            )
+            .ok()?;
+            if id != ID_PROTECT_LABEL {
+                theme::dark_control(c, w!("DarkMode_Explorer"));
+            }
+        }
         Some(h)
     }
 }
@@ -170,10 +200,41 @@ fn status(h: HWND) -> HWND {
     unsafe { GetDlgItem(Some(h), ID_STATUS).unwrap_or_default() }
 }
 
+fn child(h: HWND, id: i32) -> HWND {
+    unsafe { GetDlgItem(Some(h), id).unwrap_or_default() }
+}
+
+pub fn set_protected(h: HWND, on: bool) {
+    let state = if on { BST_CHECKED } else { BST_UNCHECKED };
+    unsafe {
+        SendMessageW(child(h, ID_PROTECT), BM_SETCHECK, Some(WPARAM(state.0 as usize)), None);
+    }
+}
+
+/// Sets the Groups button text (e.g. "Groups: work, ideas ▾").
+pub fn set_groups_label(h: HWND, text: &str) {
+    let w = wide(text);
+    unsafe {
+        let _ = SetWindowTextW(child(h, ID_GROUPS), PCWSTR(w.as_ptr()));
+    }
+}
+
+/// Screen point just below the Groups button's left edge (menu anchor).
+pub fn groups_menu_anchor(h: HWND) -> POINT {
+    let mut r = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(child(h, ID_GROUPS), &mut r);
+    }
+    POINT { x: r.left, y: r.bottom }
+}
+
 pub fn set_fonts(h: HWND, text_font: HFONT, ui_font: HFONT, _dpi: u32) {
     let re = edit(h);
     set_font(re, text_font);
     set_font(status(h), ui_font);
+    for id in [ID_PROTECT_LABEL, ID_GROUPS] {
+        set_font(child(h, id), ui_font);
+    }
     // Text color after the font (WM_SETFONT resets the default format).
     let cf = CHARFORMAT2W {
         Base: windows::Win32::UI::Controls::RichEdit::CHARFORMATW {
@@ -367,7 +428,9 @@ pub fn size(h: HWND) -> (i32, i32) {
 /// Padding between the window border and the note area; the status strip
 /// sits in the bottom padding.
 const PAD: i32 = 12;
-const STATUS_H: i32 = 26;
+const STATUS_H: i32 = 28;
+/// Groups button width (96 DPI).
+const GROUPS_W: i32 = 180;
 /// Inset of the text inside the note area.
 const TEXT_INSET_X: i32 = 10;
 const TEXT_INSET_Y: i32 = 8;
@@ -399,7 +462,18 @@ fn layout(h: HWND) {
         let (ix, iy) = (scale(TEXT_INSET_X, dpi), scale(TEXT_INSET_Y, dpi));
         let fmt = RECT { left: ix, top: iy, right: (rc.right - ix).max(ix), bottom: (rc.bottom - iy / 2).max(iy) };
         SendMessageW(re, EM_SETRECT, Some(WPARAM(0)), Some(LPARAM(&fmt as *const _ as isize)));
-        let _ = MoveWindow(status(h), n.left, n.bottom, n.right - n.left, scale(STATUS_H, dpi), true);
+        // Strip: [x] Protect   [Groups ▾]   status…
+        let strip_h = scale(STATUS_H, dpi);
+        let (box_w, label_w, btn_w, gap) = (scale(18, dpi), scale(56, dpi), scale(GROUPS_W, dpi), scale(10, dpi));
+        let btn_h = strip_h - scale(4, dpi);
+        let mut x = n.left;
+        let _ = MoveWindow(child(h, ID_PROTECT), x, n.bottom + (strip_h - box_w) / 2, box_w, box_w, true);
+        x += box_w + scale(4, dpi);
+        let _ = MoveWindow(child(h, ID_PROTECT_LABEL), x, n.bottom, label_w, strip_h, true);
+        x += label_w + gap;
+        let _ = MoveWindow(child(h, ID_GROUPS), x, n.bottom + (strip_h - btn_h) / 2 + scale(1, dpi), btn_w, btn_h, true);
+        x += btn_w + gap;
+        let _ = MoveWindow(status(h), x, n.bottom, (n.right - x).max(0), strip_h, true);
     }
 }
 
@@ -423,15 +497,20 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let _ = EndPaint(h, &ps);
             LRESULT(0)
         }
-        WM_CTLCOLORSTATIC => {
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             let dc = HDC(wp.0 as *mut _);
-            SetTextColor(dc, theme::DIM_FG);
+            let label = HWND(lp.0 as *mut _) == child(h, ID_PROTECT_LABEL);
+            SetTextColor(dc, if label { theme::NOTE_FG } else { theme::DIM_FG });
             SetBkColor(dc, theme::PAD_BG);
             LRESULT(theme::pad_brush().0 as isize)
         }
         WM_COMMAND => {
             let (id, code) = (loword(wp.0) as i32, hiword(wp.0));
-            if id == ID_EDIT {
+            if (id == ID_PROTECT && code == BN_CLICKED) || (id == ID_PROTECT_LABEL && code == STN_CLICKED) {
+                post(Action::EditorProtect(key(h)));
+            } else if id == ID_GROUPS && code == BN_CLICKED {
+                post(Action::EditorGroups(key(h)));
+            } else if id == ID_EDIT {
                 if code == EN_CHANGE && !SUPPRESS.with(|s| s.get()) {
                     SetTimer(Some(h), TIMER_DEBOUNCE, DEBOUNCE_MS, None);
                     if DIRTY.with(|d| d.borrow_mut().insert(key(h))) {

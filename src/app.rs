@@ -13,11 +13,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nmi_notes::config::{parse_hotkey, Config};
 use nmi_notes::model::diff::{apply_utf16, diff_utf16};
 use nmi_notes::model::placement::{place_window, Point};
-use nmi_notes::model::store::{Change, NoteId, Op, Store, StoreError};
+use nmi_notes::model::store::{Change, GroupId, NoteId, Op, Store, StoreError};
 use nmi_notes::model::text::{compact_count, ellipsize, first_line, line_count, relative_time, utf16_len};
 use nmi_notes::persist::{Job, Status, Writer};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetTextFaceW, ReleaseDC, SelectObject, FW_BOLD, FW_NORMAL, HFONT, HGDIOBJ,
 };
@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::log;
-use crate::win::{self, autostart, clipboard, editor, hotkeys, listwin, monitor, timefmt, toast, tray::Tray, vdesktop::VDesk};
+use crate::win::{self, autostart, clipboard, editor, help, hotkeys, listwin, menu, monitor, prompt, timefmt, toast, tray::Tray, vdesktop::VDesk};
 
 pub const WM_APP_SHOW_LIST: u32 = WM_APP + 2;
 pub const WM_APP_SPARE: u32 = WM_APP + 3;
@@ -51,11 +51,12 @@ pub enum Command {
     ShowCurrent,
     CopyCurrent,
     NoteList,
+    Help,
 }
 
 impl Command {
-    pub const ALL: [Command; 5] =
-        [Command::NewNote, Command::Append, Command::ShowCurrent, Command::CopyCurrent, Command::NoteList];
+    pub const ALL: [Command; 6] =
+        [Command::NewNote, Command::Append, Command::ShowCurrent, Command::CopyCurrent, Command::NoteList, Command::Help];
 
     pub fn id(self) -> i32 {
         self as i32 + 1
@@ -68,6 +69,7 @@ impl Command {
             "show" => Command::ShowCurrent,
             "copy" => Command::CopyCurrent,
             "list" => Command::NoteList,
+            "help" => Command::Help,
             _ => return None,
         })
     }
@@ -83,6 +85,7 @@ impl Command {
             Command::ShowCurrent => "Show current note",
             Command::CopyCurrent => "Copy current note",
             Command::NoteList => "Note list",
+            Command::Help => "Hot key help",
         }
     }
 
@@ -93,6 +96,7 @@ impl Command {
             Command::ShowCurrent => &c.hotkeys.show_current,
             Command::CopyCurrent => &c.hotkeys.copy_current,
             Command::NoteList => &c.hotkeys.note_list,
+            Command::Help => &c.hotkeys.help,
         }
     }
 }
@@ -108,12 +112,20 @@ pub enum Action {
     /// Esc: close, and return to the list if the note was opened from it.
     EditorBack(isize),
     EditorMakeCurrent(isize),
+    /// Protect checkbox clicked: toggle.
+    EditorProtect(isize),
+    /// Groups button clicked: show the groups menu.
+    EditorGroups(isize),
     ListFilter(isize),
     ListOpen(isize),
     ListMakeCurrent(isize),
     ListDelete(isize),
     ListUndo,
     ListClose(isize),
+    /// Context menu; `None`: opened from the keyboard.
+    ListMenu(isize, Option<POINT>),
+    PromptSubmit(isize),
+    PromptCancel(isize),
     WindowDpi(isize),
     WindowDestroyed(isize),
     CreateSpare,
@@ -180,13 +192,17 @@ pub fn pre_translate(msg: &MSG) -> bool {
         }
         "NmiList" => {
             let in_list = listwin::list_has_focus(root);
+            let in_group = listwin::group_has_focus(root);
             match vk {
                 v if v == VK_ESCAPE.0 => post(Action::ListClose(k)),
                 v if v == VK_RETURN.0 && ctrl => post(Action::ListMakeCurrent(k)),
                 v if v == VK_RETURN.0 => post(Action::ListOpen(k)),
-                v if v == VK_DOWN.0 && !in_list => listwin::focus_list(root),
+                v if v == VK_DOWN.0 && !in_list && !in_group => listwin::focus_list(root),
+                // Tab cycles filter -> list -> group -> filter.
                 v if v == VK_TAB.0 => {
                     if in_list {
+                        listwin::focus_group(root)
+                    } else if in_group {
                         listwin::focus_filter(root)
                     } else {
                         listwin::focus_list(root)
@@ -197,6 +213,16 @@ pub fn pre_translate(msg: &MSG) -> bool {
                 _ => return false,
             }
             return true;
+        }
+        "NmiPrompt" => {
+            if vk == VK_RETURN.0 {
+                post(Action::PromptSubmit(k));
+                return true;
+            }
+            if vk == VK_ESCAPE.0 {
+                post(Action::PromptCancel(k));
+                return true;
+            }
         }
         _ => {}
     }
@@ -219,6 +245,39 @@ struct EditorState {
     synced: Vec<u16>,
     /// Opened from the Note List: Esc returns there.
     from_list: bool,
+}
+
+/// An open text prompt.
+struct Prompt {
+    key: isize,
+    /// Window it belongs to; gets focus back when the prompt closes.
+    owner: isize,
+    purpose: PromptPurpose,
+}
+
+/// What an open text prompt is for.
+enum PromptPurpose {
+    /// Create a group, then add these notes to it.
+    NewGroup { add: Vec<NoteId> },
+    RenameGroup(GroupId),
+}
+
+// Context-menu command ids.
+const MENU_NEW_GROUP: u32 = 1;
+const MENU_NEW_GROUP_ADD: u32 = 2;
+const MENU_RENAME_GROUP: u32 = 3;
+const MENU_DELETE_GROUP: u32 = 4;
+const MENU_GROUP: u32 = 1000;
+const MENU_ADD: u32 = 2000;
+const MENU_REMOVE: u32 = 3000;
+
+/// Menu and button labels treat `&` as a mnemonic marker.
+fn menu_text(s: &str) -> String {
+    s.replace('&', "&&")
+}
+
+fn quoted(s: &str) -> String {
+    format!("“{s}”")
 }
 
 #[derive(Default)]
@@ -280,8 +339,10 @@ pub struct App {
     spare_list: Option<HWND>,
     lists: Vec<isize>,
     last_deleted: Vec<NoteId>,
-    /// Filter of the list that last opened notes, restored on return.
+    /// Filter and group of the list that last opened notes, restored on return.
     list_filter: String,
+    list_group: Option<GroupId>,
+    prompt: Option<Prompt>,
     fonts: Fonts,
     editor_size_96: (i32, i32),
     writer_events: Arc<Mutex<Vec<Status>>>,
@@ -317,6 +378,8 @@ impl App {
             lists: Vec::new(),
             last_deleted: Vec::new(),
             list_filter: String::new(),
+            list_group: None,
+            prompt: None,
             fonts: Fonts::default(),
             editor_size_96: EDITOR_SIZE,
             writer_events,
@@ -365,6 +428,14 @@ impl App {
                     toast::show(&format!("Current: {}", self.preview(id, 60)));
                 }
             }
+            Action::EditorProtect(k) => {
+                if let Some(n) = self.editors.get(&k).and_then(|s| self.store.live(s.note)) {
+                    let (id, protected) = (n.id, !n.protected);
+                    self.apply(Op::SetProtected { id, protected }, None);
+                }
+                editor::focus(win::hwnd(k));
+            }
+            Action::EditorGroups(k) => self.editor_groups_menu(k),
             Action::ListFilter(k) => self.refresh_list(win::hwnd(k)),
             Action::ListOpen(k) => {
                 let h = win::hwnd(k);
@@ -376,6 +447,7 @@ impl App {
                     return;
                 }
                 self.list_filter = listwin::filter_text(h);
+                self.list_group = listwin::group_filter(h);
                 unsafe {
                     let _ = DestroyWindow(h);
                 }
@@ -397,8 +469,15 @@ impl App {
                 }
             }
             Action::ListDelete(k) => {
-                let ids = listwin::selected_ids(win::hwnd(k));
+                let selected = listwin::selected_ids(win::hwnd(k));
+                if selected.is_empty() {
+                    return;
+                }
+                let (kept, ids): (Vec<NoteId>, Vec<NoteId>) =
+                    selected.into_iter().partition(|id| self.store.note(*id).is_some_and(|n| n.protected));
                 if ids.is_empty() {
+                    let n = kept.len();
+                    toast::show(&if n == 1 { "Protected — not deleted".to_owned() } else { format!("{n} protected notes — not deleted") });
                     return;
                 }
                 for id in &ids {
@@ -407,7 +486,8 @@ impl App {
                 if self.apply(Op::Delete { ids: ids.clone() }, None).is_some() {
                     let n = ids.len();
                     self.last_deleted = ids;
-                    toast::show(&format!("Deleted {n} note{} — Ctrl+Z in list to undo", plural(n)));
+                    let kept = if kept.is_empty() { String::new() } else { format!(", kept {} protected", kept.len()) };
+                    toast::show(&format!("Deleted {n} note{}{kept} — Ctrl+Z in list to undo", plural(n)));
                 }
             }
             Action::ListUndo => {
@@ -422,10 +502,18 @@ impl App {
             Action::ListClose(k) => unsafe {
                 let _ = DestroyWindow(win::hwnd(k));
             },
+            Action::ListMenu(k, at) => self.list_menu(win::hwnd(k), at),
+            Action::PromptSubmit(k) => self.prompt_submit(k),
+            Action::PromptCancel(k) => {
+                self.close_prompt(k);
+            }
             Action::WindowDpi(k) => self.apply_fonts(win::hwnd(k)),
             Action::WindowDestroyed(k) => {
                 self.editors.remove(&k);
                 self.lists.retain(|l| *l != k);
+                if self.prompt.as_ref().is_some_and(|p| p.key == k) {
+                    self.prompt = None;
+                }
                 if self.spare.map(win::key) == Some(k) {
                     self.spare = None;
                 }
@@ -482,9 +570,9 @@ impl App {
             log!("hotkeys unavailable: {}", failed.join(", "));
             toast::show(&format!("Hotkey unavailable: {}", failed.join(", ")));
         } else {
-            toast::show(&format!("nmi-notes ready — {} notes", self.store.list("").len()));
+            toast::show(&format!("nmi-notes ready — {} notes", self.store.list("", None).len()));
         }
-        log!("started with {} notes", self.store.list("").len());
+        log!("started with {} notes", self.store.list("", None).len());
     }
 
     fn shutdown(&mut self) {
@@ -634,6 +722,10 @@ impl App {
                 None => toast::show("No current note"),
             },
             Command::NoteList => self.show_list(),
+            Command::Help => {
+                let rows = Command::ALL.iter().map(|c| (c.binding(&self.config).to_owned(), c.label().to_owned())).collect();
+                help::show(rows);
+            }
         }
     }
 
@@ -687,8 +779,15 @@ impl App {
                     self.writer.send(Job::Upsert(n.clone()));
                 }
             }
-            if let Change::Current { new, .. } = ch {
-                self.writer.send(Job::SetCurrent(*new));
+            match ch {
+                Change::Current { new, .. } => self.writer.send(Job::SetCurrent(*new)),
+                Change::GroupSaved { id } => {
+                    if let Some(g) = self.store.group(*id) {
+                        self.writer.send(Job::UpsertGroup(g.clone()));
+                    }
+                }
+                Change::GroupDeleted { id, .. } => self.writer.send(Job::DeleteGroup(*id)),
+                _ => {}
             }
         }
     }
@@ -738,6 +837,18 @@ impl App {
                         }
                     }
                 }
+                Change::Protected { id, .. } => self.refresh_editor_chrome(*id),
+                Change::Membership { ids } => {
+                    for id in ids {
+                        self.refresh_editor_chrome(*id);
+                    }
+                }
+                // Group names show on every editor's Groups button.
+                Change::GroupSaved { .. } | Change::GroupDeleted { .. } => {
+                    for k in self.editors.keys().copied().collect::<Vec<_>>() {
+                        self.refresh_editor_chrome_for(k);
+                    }
+                }
                 Change::Created { .. } | Change::Undeleted { .. } => {}
             }
         }
@@ -782,7 +893,12 @@ impl App {
         let op = Op::Edit { id: note, base_rev: base, start: sp.start, old_len: sp.old_len, text };
         match self.store.dispatch(op, now_ms()) {
             Ok(changes) => self.after_editor_dispatch(k, current, changes),
-            Err(StoreError::StaleRevision { .. }) | Err(StoreError::OutOfRange) => {
+            // Group errors can't come from a text edit.
+            Err(StoreError::StaleRevision { .. })
+            | Err(StoreError::OutOfRange)
+            | Err(StoreError::NoSuchGroup(_))
+            | Err(StoreError::EmptyGroupName)
+            | Err(StoreError::GroupNameTaken(_)) => {
                 // Should not happen (flush-before-dispatch). Keep what the
                 // user sees: replace the whole note with the editor's text.
                 log!("editor out of sync on note {note}; saving editor text as-is");
@@ -901,6 +1017,10 @@ impl App {
             status.push_str("   ·   Esc: back to list");
         }
         editor::set_status(h, &status);
+        editor::set_protected(h, n.protected);
+        let names = self.store.group_names(n.id);
+        let label = if names.is_empty() { "Groups ▾".to_owned() } else { format!("Groups: {} ▾", ellipsize(&names, 22)) };
+        editor::set_groups_label(h, &menu_text(&label));
     }
 
     fn apply_fonts(&mut self, h: HWND) {
@@ -994,6 +1114,7 @@ impl App {
         if let Some(k) = existing {
             let h = win::hwnd(k);
             if let Some((filter, id)) = back {
+                listwin::select_group(h, self.list_group);
                 listwin::set_filter(h, filter);
                 self.refresh_list(h);
                 listwin::select_only(h, id);
@@ -1015,6 +1136,8 @@ impl App {
         let bold = self.fonts.get(2, dpi, &self.config);
         listwin::set_fonts(h, ui, bold);
         if let Some((filter, _)) = back {
+            self.refresh_list(h); // loads the group dropdown
+            listwin::select_group(h, self.list_group);
             listwin::set_filter(h, filter);
         }
         self.refresh_list(h);
@@ -1042,31 +1165,231 @@ impl App {
     }
 
     fn refresh_list(&mut self, h: HWND) {
+        listwin::set_groups(h, self.store.groups().iter().map(|g| (g.id, g.name.clone())).collect());
+        let group = listwin::group_filter(h);
         let filter = listwin::filter_text(h);
         let now = now_ms();
         let current = self.store.current();
-        let rows = self
+        let rows: Vec<listwin::Row> = self
             .store
-            .list(&filter)
+            .list(&filter, group)
             .into_iter()
             .filter_map(|id| self.store.note(id))
             .map(|n| listwin::Row {
                 id: n.id,
                 current: Some(n.id) == current,
+                protected: n.protected,
                 preview: self.preview(n.id, 200),
+                groups: self.store.group_names(n.id),
                 updated_rel: relative_time(now, n.updated),
                 updated_abs: timefmt::local_datetime(n.updated),
                 size: compact_count(n.text.chars().count()),
             })
             .collect();
+        let shown = rows.len();
         listwin::populate(h, rows);
-        let count = self.store.list("").len();
-        let title = if filter.trim().is_empty() {
-            format!("Notes ({count}) — nmi-notes")
-        } else {
-            format!("Notes (filtered of {count}) — nmi-notes")
+        let count = self.store.list("", None).len();
+        let title = match (group.and_then(|g| self.store.group(g)), filter.trim().is_empty()) {
+            (None, true) => format!("Notes ({count}) — nmi-notes"),
+            (None, false) => format!("Notes ({shown} of {count}) — nmi-notes"),
+            (Some(g), _) => format!("Notes in {} ({shown} of {count}) — nmi-notes", quoted(&g.name)),
         };
         editor::set_caption(h, &title);
+    }
+
+    // ---- groups ---------------------------------------------------------------
+
+    fn editor_groups_menu(&mut self, k: isize) {
+        let h = win::hwnd(k);
+        let Some(id) = self.editors.get(&k).map(|s| s.note) else { return };
+        let Some(note) = self.store.live(id) else { return };
+        let groups: Vec<(GroupId, String)> = self.store.groups().iter().map(|g| (g.id, g.name.clone())).collect();
+        let mut items: Vec<menu::Item> = groups
+            .iter()
+            .enumerate()
+            .map(|(i, (g, name))| menu::Item::Cmd {
+                id: MENU_GROUP + i as u32,
+                label: menu_text(name),
+                checked: note.groups.contains(g),
+                enabled: true,
+            })
+            .collect();
+        if !items.is_empty() {
+            items.push(menu::Item::Sep);
+        }
+        items.push(menu::Item::cmd(MENU_NEW_GROUP, "New group…"));
+        match menu::popup(h, &items, Some(editor::groups_menu_anchor(h))) {
+            Some(MENU_NEW_GROUP) => {
+                let purpose = PromptPurpose::NewGroup { add: vec![id] };
+                self.open_prompt(h, "New group", "Name for the new group (this note joins it):", "", purpose);
+                return;
+            }
+            Some(c) if c >= MENU_GROUP => {
+                if let Some((g, _)) = groups.get((c - MENU_GROUP) as usize) {
+                    let member = self.store.note(id).is_some_and(|n| n.groups.contains(g));
+                    let op = if member {
+                        Op::RemoveFromGroup { ids: vec![id], group: *g }
+                    } else {
+                        Op::AddToGroup { ids: vec![id], group: *g }
+                    };
+                    self.apply(op, None);
+                }
+            }
+            _ => {}
+        }
+        editor::focus(h);
+    }
+
+    fn list_menu(&mut self, h: HWND, at: Option<POINT>) {
+        let sel = listwin::selected_ids(h);
+        let groups: Vec<(GroupId, String)> = self.store.groups().iter().map(|g| (g.id, g.name.clone())).collect();
+        let in_group =
+            |g: GroupId| sel.iter().filter(|id| self.store.note(**id).is_some_and(|n| n.groups.contains(&g))).count();
+        let mut add: Vec<menu::Item> = groups
+            .iter()
+            .enumerate()
+            .map(|(i, (g, name))| menu::Item::Cmd {
+                id: MENU_ADD + i as u32,
+                label: menu_text(name),
+                checked: false,
+                enabled: in_group(*g) < sel.len(),
+            })
+            .collect();
+        if !add.is_empty() {
+            add.push(menu::Item::Sep);
+        }
+        add.push(menu::Item::cmd(MENU_NEW_GROUP_ADD, "New group…"));
+        let remove: Vec<menu::Item> = groups
+            .iter()
+            .enumerate()
+            .filter(|(_, (g, _))| in_group(*g) > 0)
+            .map(|(i, (_, name))| menu::Item::cmd(MENU_REMOVE + i as u32, menu_text(name)))
+            .collect();
+        let filtered = listwin::group_filter(h).and_then(|g| self.store.group(g)).map(|g| (g.id, g.name.clone()));
+        let mut items = vec![
+            menu::Item::Sub { label: "Add to group".into(), enabled: !sel.is_empty(), items: add },
+            menu::Item::Sub { label: "Remove from group".into(), enabled: !remove.is_empty(), items: remove },
+            menu::Item::Sep,
+            menu::Item::cmd(MENU_NEW_GROUP, "New group…"),
+        ];
+        if let Some((_, name)) = &filtered {
+            items.push(menu::Item::cmd(MENU_RENAME_GROUP, format!("Rename group {}…", menu_text(&quoted(name)))));
+            items.push(menu::Item::cmd(MENU_DELETE_GROUP, format!("Delete group {}", menu_text(&quoted(name)))));
+        }
+        let Some(choice) = menu::popup(h, &items, at) else { return };
+        let n = sel.len();
+        match choice {
+            MENU_NEW_GROUP => {
+                self.open_prompt(h, "New group", "Name for the new group:", "", PromptPurpose::NewGroup { add: vec![] })
+            }
+            MENU_NEW_GROUP_ADD => {
+                let hint = format!("Name for the new group ({n} note{} join{} it):", plural(n), if n == 1 { "s" } else { "" });
+                self.open_prompt(h, "New group", &hint, "", PromptPurpose::NewGroup { add: sel });
+            }
+            MENU_RENAME_GROUP => {
+                if let Some((g, name)) = filtered {
+                    self.open_prompt(h, "Rename group", "New name for the group:", &name, PromptPurpose::RenameGroup(g));
+                }
+            }
+            MENU_DELETE_GROUP => {
+                if let Some((g, name)) = filtered {
+                    if self.apply(Op::DeleteGroup { id: g }, None).is_some() {
+                        if self.list_group == Some(g) {
+                            self.list_group = None;
+                        }
+                        toast::show(&format!("Deleted group {} — its notes are kept", quoted(&name)));
+                    }
+                }
+            }
+            c if (MENU_REMOVE..MENU_REMOVE + 1000).contains(&c) => {
+                if let Some((g, name)) = groups.get((c - MENU_REMOVE) as usize) {
+                    if self.apply(Op::RemoveFromGroup { ids: sel, group: *g }, None).is_some() {
+                        toast::show(&format!("Removed {n} note{} from {}", plural(n), quoted(name)));
+                    }
+                }
+            }
+            c if (MENU_ADD..MENU_ADD + 1000).contains(&c) => {
+                if let Some((g, name)) = groups.get((c - MENU_ADD) as usize) {
+                    if self.apply(Op::AddToGroup { ids: sel, group: *g }, None).is_some() {
+                        toast::show(&format!("Added {n} note{} to {}", plural(n), quoted(name)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_prompt(&mut self, owner: HWND, title: &str, hint: &str, initial: &str, purpose: PromptPurpose) {
+        if let Some(p) = self.prompt.take() {
+            unsafe {
+                let _ = DestroyWindow(win::hwnd(p.key));
+            }
+        }
+        let dpi = unsafe { GetDpiForWindow(owner) }.max(96);
+        let font = self.fonts.get(1, dpi, &self.config);
+        if let Some(h) = prompt::open(owner, title, hint, initial, font) {
+            self.prompt = Some(Prompt { key: win::key(h), owner: win::key(owner), purpose });
+        }
+    }
+
+    /// Closes the prompt; a list owner gets focus back on its rows (where
+    /// the menu was used), an editor on its text.
+    fn close_prompt(&mut self, k: isize) -> Option<Prompt> {
+        let p = self.prompt.take_if(|p| p.key == k);
+        unsafe {
+            let _ = DestroyWindow(win::hwnd(k));
+        }
+        if let Some(p) = &p {
+            let owner = win::hwnd(p.owner);
+            if unsafe { IsWindow(Some(owner)).as_bool() } {
+                if self.lists.contains(&p.owner) {
+                    listwin::focus_list(owner);
+                } else {
+                    editor::focus(owner);
+                }
+            }
+        }
+        p
+    }
+
+    /// Validates the prompt's text; on success closes it and acts.
+    fn prompt_submit(&mut self, k: isize) {
+        let h = win::hwnd(k);
+        let Some(p) = self.prompt.as_ref().filter(|p| p.key == k) else { return };
+        let existing = match p.purpose {
+            PromptPurpose::NewGroup { .. } => None,
+            PromptPurpose::RenameGroup(g) => Some(g),
+        };
+        let name = match self.store.check_group_name(&prompt::text(h), existing) {
+            Ok(name) => name,
+            Err(StoreError::GroupNameTaken(other)) => {
+                prompt::set_error(h, &format!("A group named {} already exists", quoted(&other)));
+                return;
+            }
+            Err(_) => {
+                prompt::set_error(h, "Enter a name for the group");
+                return;
+            }
+        };
+        let Some(Prompt { purpose, .. }) = self.close_prompt(k) else { return };
+        match purpose {
+            PromptPurpose::NewGroup { add } => {
+                let Some(changes) = self.apply(Op::CreateGroup { name: name.clone() }, None) else { return };
+                let Some(Change::GroupSaved { id }) = changes.first() else { return };
+                let n = add.len();
+                if n > 0 {
+                    self.apply(Op::AddToGroup { ids: add, group: *id }, None);
+                    toast::show(&format!("Created group {} — added {n} note{}", quoted(&name), plural(n)));
+                } else {
+                    toast::show(&format!("Created group {}", quoted(&name)));
+                }
+            }
+            PromptPurpose::RenameGroup(g) => {
+                if self.apply(Op::RenameGroup { id: g, name: name.clone() }, None).is_some() {
+                    toast::show(&format!("Renamed group to {}", quoted(&name)));
+                }
+            }
+        }
     }
 }
 

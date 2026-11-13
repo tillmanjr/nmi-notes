@@ -10,6 +10,7 @@ between apps, screens, and virtual desktops without leaving what you're doing.
 | `Win+Alt+S` | **Show** the Current note in an editor near the pointer |
 | `Win+Alt+C` | **Copy** the Current note to the clipboard — toast only |
 | `Win+Alt+L` | Note **list**: filter, open, set Current, delete |
+| `Win+Alt+H` | **Help**: popup listing the hot keys (click or `Esc` closes it) |
 
 Editor: `Esc`/`Ctrl+W` close (`Esc` returns to the list, filter and
 selection intact, when the note was opened from it), `Ctrl+Shift+Enter` make
@@ -18,6 +19,19 @@ Current. Edits save automatically (~250 ms after you stop typing, and on focus l
 List: type to filter, `↓`/`Tab` to the list, `Enter` open selected,
 `Ctrl+Enter` make Current, `Del` delete, `Ctrl+Z` undo delete, `Esc` close.
 
+**Protect:** tick **Protect** at the bottom of the editor and the note can't be
+deleted (🔒 in the list). Untick it to allow deleting again.
+
+**Groups:** named groups (unique, ignoring case) that you create as you go.
+- **In the editor:** **Groups ▾** lists every group. Tick or untick one to add
+  or remove this note, or choose **New group…**.
+- **In the list:** right-click the selected notes (or press `Shift+F10`) for
+  **Add to group**, **Remove from group** and **New group…**.
+- **Browsing:** the dropdown left of the filter box limits the list to one
+  group. With a group chosen, the same menu can rename or delete it. Deleting a
+  group never deletes its notes.
+- **Keyboard:** `Tab` cycles filter → list → group dropdown.
+
 ## Build & run
 
 ```
@@ -25,8 +39,22 @@ cargo build --release
 target\release\nmi-notes.exe
 ```
 
+Installer (needs Inno Setup 6: `winget install JRSoftware.InnoSetup`):
+
+```
+build-installer.cmd
+```
+
+This does a release build, then writes `target\installer\nmi-notes-<version>-setup.exe`.
+It's a per-user install to `%LOCALAPPDATA%\Programs\nmi-notes`, so no admin
+prompt. It adds a Start menu shortcut and has an optional **Start nmi-notes when I sign in
+to Windows** checkbox. The checkbox runs `nmi-notes.exe --autostart on|off`,
+which sets `start_with_windows` in `config.toml` and updates the Run key.
+Uninstalling closes the app and removes the Run key; your notes and config stay.
+
 Scripting (from another tool, e.g. AutoHotkey or a Stream Deck):
-`nmi-notes.exe --cmd new|append|show|copy|list`, `nmi-notes.exe --exit`.
+`nmi-notes.exe --cmd new|append|show|copy|list|help`, `nmi-notes.exe --exit`,
+`nmi-notes.exe --autostart on|off`.
 `nmi-notes.exe --version` prints version and license (tray menu → About shows
 the same).
 

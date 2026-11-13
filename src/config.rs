@@ -14,6 +14,7 @@ pub struct Hotkeys {
     pub show_current: String,
     pub copy_current: String,
     pub note_list: String,
+    pub help: String,
 }
 
 impl Default for Hotkeys {
@@ -24,6 +25,7 @@ impl Default for Hotkeys {
             show_current: "Win+Alt+S".into(),
             copy_current: "Win+Alt+C".into(),
             note_list: "Win+Alt+L".into(),
+            help: "Win+Alt+H".into(),
         }
     }
 }
@@ -65,6 +67,49 @@ pub fn load_or_create(path: &Path) -> (Config, Option<String>) {
             (c, None)
         }
     }
+}
+
+/// Sets `start_with_windows` in the config file, editing just that line so
+/// hand-written comments and layout survive (creates the file if missing).
+pub fn set_start_with_windows(path: &Path, enabled: bool) -> std::io::Result<()> {
+    let line = format!("start_with_windows = {enabled}");
+    let body = match std::fs::read_to_string(path) {
+        Ok(s) => set_top_level_line(&s, "start_with_windows", &line),
+        Err(_) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let c = Config { start_with_windows: enabled, ..Config::default() };
+            toml::to_string_pretty(&c).map_err(std::io::Error::other)?
+        }
+    };
+    std::fs::write(path, body)
+}
+
+/// Replaces the top-level `key = …` line (before the first `[table]`), or
+/// inserts `line` just ahead of the first table if the key is absent.
+fn set_top_level_line(s: &str, key: &str, line: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut done = false;
+    for l in s.lines() {
+        let t = l.trim_start();
+        if !done && t.starts_with('[') {
+            out.push(line.to_owned());
+            done = true;
+        }
+        if !done && t.strip_prefix(key).is_some_and(|r| r.trim_start().starts_with('=')) {
+            out.push(line.to_owned());
+            done = true;
+            continue;
+        }
+        out.push(l.to_owned());
+    }
+    if !done {
+        out.push(line.to_owned());
+    }
+    let mut body = out.join("\n");
+    body.push('\n');
+    body
 }
 
 pub const MOD_ALT: u32 = 0x1;
@@ -148,7 +193,7 @@ mod tests {
     #[test]
     fn defaults_parse_and_roundtrip() {
         let c = Config::default();
-        for h in [&c.hotkeys.new_note, &c.hotkeys.append, &c.hotkeys.show_current, &c.hotkeys.copy_current, &c.hotkeys.note_list] {
+        for h in [&c.hotkeys.new_note, &c.hotkeys.append, &c.hotkeys.show_current, &c.hotkeys.copy_current, &c.hotkeys.note_list, &c.hotkeys.help] {
             assert!(parse_hotkey(h).is_ok(), "{h}");
         }
         let back: Config = toml::from_str(&toml::to_string_pretty(&c).unwrap()).unwrap();
@@ -170,5 +215,35 @@ mod tests {
         let (c2, _) = load_or_create(&p2);
         assert_eq!(c2, Config::default());
         assert!(p2.exists());
+    }
+
+    #[test]
+    fn set_start_with_windows_edits_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "# mine\nfont_size = 14\nstart_with_windows = false # old\n\n[hotkeys]\nappend = \"Ctrl+Alt+A\"\n").unwrap();
+        set_start_with_windows(&p, true).unwrap();
+        let s = std::fs::read_to_string(&p).unwrap();
+        assert!(s.starts_with("# mine\nfont_size = 14\nstart_with_windows = true\n"), "{s}");
+        let (c, err) = load_or_create(&p);
+        assert!(err.is_none());
+        assert!(c.start_with_windows);
+        assert_eq!(c.font_size, 14);
+        assert_eq!(c.hotkeys.append, "Ctrl+Alt+A");
+    }
+
+    #[test]
+    fn set_start_with_windows_inserts_before_tables_or_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "font_size = 9\n[hotkeys]\nstart_with_windows_x = 1\n").unwrap();
+        set_start_with_windows(&p, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "font_size = 9\nstart_with_windows = true\n[hotkeys]\nstart_with_windows_x = 1\n");
+
+        let p2 = dir.path().join("new").join("config.toml");
+        set_start_with_windows(&p2, true).unwrap();
+        let (c, err) = load_or_create(&p2);
+        assert!(err.is_none());
+        assert_eq!(c, Config { start_with_windows: true, ..Config::default() });
     }
 }

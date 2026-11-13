@@ -39,7 +39,7 @@ pub fn run() -> i32 {
     check("caret at end after set_text", editor::selection(h) == (got.len(), got.len()), format!("{:?}", editor::selection(h)));
 
     // 2. Local edit -> diff -> store edit stays identical to editor text.
-    let mut store = Store::new(vec![], None);
+    let mut store = Store::new(vec![], vec![], None);
     let ch = store.dispatch(Op::Create { text: initial.into() }, 1).unwrap();
     let Change::Created { id } = ch[0] else { unreachable!() };
     let mut synced = u16s(initial);

@@ -62,11 +62,26 @@ fn main() {
         println!("{}", nmi_notes::about::text());
         return;
     }
+    // Installer hook: `--autostart on|off` records the choice in config.toml
+    // (the app re-applies it at every launch) and updates the Run key now.
+    if let Some(i) = std::env::args().position(|a| a == "--autostart") {
+        let enabled = match std::env::args().nth(i + 1).as_deref() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => std::process::exit(2),
+        };
+        if let Err(e) = nmi_notes::config::set_start_with_windows(&config_path, enabled) {
+            log!("--autostart: cannot write {}: {e}", config_path.display());
+            std::process::exit(1);
+        }
+        win::autostart::apply(enabled);
+        return;
+    }
     if std::env::args().any(|a| a == "--selftest") {
         std::process::exit(selftest::run());
     }
 
-    // Remote control: `--cmd new|append|show|copy|list`, `--exit`.
+    // Remote control: `--cmd new|append|show|copy|list|help`, `--exit`.
     let args: Vec<String> = std::env::args().collect();
     let remote = if args.iter().any(|a| a == "--exit") {
         Some(0)
@@ -74,7 +89,7 @@ fn main() {
         match args.get(i + 1).and_then(|n| Command::from_name(n)) {
             Some(c) => Some(c.id() as usize),
             None => {
-                eprintln!("usage: nmi-notes [--cmd new|append|show|copy|list] [--exit] [--version]");
+                eprintln!("usage: nmi-notes [--cmd new|append|show|copy|list|help] [--exit] [--autostart on|off] [--version]");
                 std::process::exit(2);
             }
         }
@@ -117,6 +132,8 @@ fn main() {
     win::toast::init();
     win::editor::register_class();
     win::listwin::register_class();
+    win::help::register_class();
+    win::prompt::register_class();
     let main = match create_main_window() {
         Some(h) => h,
         None => {
@@ -140,7 +157,7 @@ fn main() {
     );
     install_panic_hook(writer.sender());
 
-    let store = Store::new(loaded.notes, loaded.current);
+    let store = Store::new(loaded.notes, loaded.groups, loaded.current);
     let paths = app::Paths { backups: data_dir.join("backups"), data_dir, config: config_path };
     app::install(app::App::new(main, store, writer, config, config_error, paths, events));
     app::post(Action::Startup);

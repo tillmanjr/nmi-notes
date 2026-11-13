@@ -13,10 +13,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::model::store::{Note, NoteId};
+use crate::model::store::{Group, GroupId, Note, NoteId};
 
 pub enum Job {
     Upsert(Note),
+    UpsertGroup(Group),
+    DeleteGroup(GroupId),
     SetCurrent(Option<NoteId>),
     Backup { dir: PathBuf, date: String },
     /// Acknowledged once everything queued before it is committed.
@@ -81,6 +83,8 @@ impl Writer {
 #[derive(Default)]
 struct Pending {
     notes: BTreeMap<NoteId, Note>,
+    /// `None`: delete.
+    groups: BTreeMap<GroupId, Option<Group>>,
     current: Option<Option<NoteId>>,
     backups: Vec<(PathBuf, String)>,
     acks: Vec<Sender<()>>,
@@ -88,7 +92,7 @@ struct Pending {
 
 impl Pending {
     fn has_writes(&self) -> bool {
-        !self.notes.is_empty() || self.current.is_some()
+        !self.notes.is_empty() || !self.groups.is_empty() || self.current.is_some()
     }
 
     /// Returns true if this was a shutdown request.
@@ -96,6 +100,12 @@ impl Pending {
         match job {
             Job::Upsert(n) => {
                 self.notes.insert(n.id, n);
+            }
+            Job::UpsertGroup(g) => {
+                self.groups.insert(g.id, Some(g));
+            }
+            Job::DeleteGroup(id) => {
+                self.groups.insert(id, None);
             }
             Job::SetCurrent(c) => self.current = Some(c),
             Job::Backup { dir, date } => self.backups.push((dir, date)),
@@ -136,9 +146,10 @@ fn run(conn: Connection, db_path: PathBuf, rx: Receiver<Job>, on_status: Box<dyn
         }
 
         if p.has_writes() {
-            match super::write_batch(&conn, p.notes.values(), p.current) {
+            match super::write_batch(&conn, &p.groups, p.notes.values(), p.current) {
                 Ok(()) => {
                     p.notes.clear();
+                    p.groups.clear();
                     p.current = None;
                     if failures > 0 {
                         on_status(Status::Healthy);
@@ -151,6 +162,7 @@ fn run(conn: Connection, db_path: PathBuf, rx: Receiver<Job>, on_status: Box<dyn
                     if shutdown && failures >= SHUTDOWN_ATTEMPTS {
                         on_status(write_recovery(&db_path, &p));
                         p.notes.clear();
+                        p.groups.clear();
                         p.current = None;
                     } else {
                         if shutdown {
@@ -184,11 +196,21 @@ struct RecoveryNote<'a> {
     revision: u64,
     deleted_at: Option<i64>,
     text: &'a str,
+    protected: bool,
+    groups: Vec<GroupId>,
+}
+
+#[derive(Serialize)]
+struct RecoveryGroup<'a> {
+    id: GroupId,
+    /// `None`: the group was deleted.
+    name: Option<&'a str>,
 }
 
 #[derive(Serialize)]
 struct Recovery<'a> {
     current: Option<Option<NoteId>>,
+    groups: Vec<RecoveryGroup<'a>>,
     notes: Vec<RecoveryNote<'a>>,
 }
 
@@ -197,6 +219,7 @@ fn write_recovery(db_path: &std::path::Path, p: &Pending) -> Status {
     let path = db_path.with_file_name(format!("recovery-{ms}.json"));
     let doc = Recovery {
         current: p.current,
+        groups: p.groups.iter().map(|(id, g)| RecoveryGroup { id: *id, name: g.as_ref().map(|g| g.name.as_str()) }).collect(),
         notes: p
             .notes
             .values()
@@ -207,6 +230,8 @@ fn write_recovery(db_path: &std::path::Path, p: &Pending) -> Status {
                 revision: n.revision,
                 deleted_at: n.deleted_at,
                 text: &n.text,
+                protected: n.protected,
+                groups: n.groups.iter().copied().collect(),
             })
             .collect(),
     };
@@ -222,7 +247,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn note(id: NoteId, text: &str, rev: u64) -> Note {
-        Note { id, created: 1, updated: rev as i64, revision: rev, deleted_at: None, text: text.into() }
+        Note { id, created: 1, updated: rev as i64, revision: rev, deleted_at: None, text: text.into(), ..Default::default() }
     }
 
     #[test]

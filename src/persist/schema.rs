@@ -6,7 +6,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-pub const VERSION: i32 = 1;
+pub const VERSION: i32 = 2;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1
@@ -23,7 +23,23 @@ const MIGRATIONS: &[&str] = &[
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
      );",
+    // 1 -> 2: protected notes, groups. Group-name uniqueness is enforced by
+    // the store, not here, so coalesced renames (a↔b) can't fail a batch.
+    "ALTER TABLE notes ADD COLUMN protected INTEGER NOT NULL DEFAULT 0;
+     CREATE TABLE groups (
+        id   INTEGER PRIMARY KEY,
+        name TEXT    NOT NULL
+     );
+     CREATE TABLE note_groups (
+        note_id  INTEGER NOT NULL,
+        group_id INTEGER NOT NULL,
+        PRIMARY KEY (note_id, group_id)
+     ) WITHOUT ROWID;
+     CREATE INDEX note_groups_group ON note_groups(group_id);",
 ];
+
+#[cfg(test)]
+pub const MIGRATIONS_FOR_TEST: &[&str] = MIGRATIONS;
 
 /// Brings the database to `VERSION`. Takes a `VACUUM INTO` snapshot next to
 /// the database before upgrading an existing (non-empty) schema.
