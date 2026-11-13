@@ -13,13 +13,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::model::store::{Group, GroupId, Note, NoteId};
+use crate::model::store::{Group, GroupId, ListView, Note, NoteId};
 
 pub enum Job {
     Upsert(Note),
     UpsertGroup(Group),
     DeleteGroup(GroupId),
     SetCurrent(Option<NoteId>),
+    SetListView(ListView),
     Backup { dir: PathBuf, date: String },
     /// Acknowledged once everything queued before it is committed.
     Flush(Sender<()>),
@@ -86,13 +87,14 @@ struct Pending {
     /// `None`: delete.
     groups: BTreeMap<GroupId, Option<Group>>,
     current: Option<Option<NoteId>>,
+    list_view: Option<ListView>,
     backups: Vec<(PathBuf, String)>,
     acks: Vec<Sender<()>>,
 }
 
 impl Pending {
     fn has_writes(&self) -> bool {
-        !self.notes.is_empty() || !self.groups.is_empty() || self.current.is_some()
+        !self.notes.is_empty() || !self.groups.is_empty() || self.current.is_some() || self.list_view.is_some()
     }
 
     /// Returns true if this was a shutdown request.
@@ -108,6 +110,7 @@ impl Pending {
                 self.groups.insert(id, None);
             }
             Job::SetCurrent(c) => self.current = Some(c),
+            Job::SetListView(v) => self.list_view = Some(v),
             Job::Backup { dir, date } => self.backups.push((dir, date)),
             Job::Flush(ack) => self.acks.push(ack),
             Job::Shutdown(ack) => {
@@ -146,11 +149,12 @@ fn run(conn: Connection, db_path: PathBuf, rx: Receiver<Job>, on_status: Box<dyn
         }
 
         if p.has_writes() {
-            match super::write_batch(&conn, &p.groups, p.notes.values(), p.current) {
+            match super::write_batch(&conn, &p.groups, p.notes.values(), p.current, p.list_view) {
                 Ok(()) => {
                     p.notes.clear();
                     p.groups.clear();
                     p.current = None;
+                    p.list_view = None;
                     if failures > 0 {
                         on_status(Status::Healthy);
                     }
@@ -164,6 +168,7 @@ fn run(conn: Connection, db_path: PathBuf, rx: Receiver<Job>, on_status: Box<dyn
                         p.notes.clear();
                         p.groups.clear();
                         p.current = None;
+                        p.list_view = None;
                     } else {
                         if shutdown {
                             std::thread::sleep(Duration::from_millis(100));

@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use nmi_notes::model::placement::Rect;
-use nmi_notes::model::store::{GroupId, NoteId};
+use nmi_notes::model::store::{GroupId, ListView, NoteId};
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -62,7 +62,7 @@ pub struct Row {
 struct Data {
     rows: Vec<Row>,
     bold: HFONT,
-    /// Group dropdown entries after "All notes".
+    /// Group dropdown entries, between "Ungrouped" and "All notes".
     groups: Vec<(GroupId, String)>,
 }
 
@@ -150,8 +150,10 @@ pub fn create() -> Option<HWND> {
         )
         .ok()?;
         theme::dark_control(cb, w!("DarkMode_CFD"));
-        let all = wide("All notes");
-        SendMessageW(cb, CB_ADDSTRING, None, Some(LPARAM(all.as_ptr() as isize)));
+        for label in ["Ungrouped", "All notes"] {
+            let w = wide(label);
+            SendMessageW(cb, CB_ADDSTRING, None, Some(LPARAM(w.as_ptr() as isize)));
+        }
         SendMessageW(cb, CB_SETCURSEL, Some(WPARAM(0)), None);
         let cue = wide("Filter notes…");
         theme::dark_control(f, w!("DarkMode_CFD"));
@@ -322,50 +324,59 @@ pub fn set_filter(h: HWND, text: &str) {
     }
 }
 
-/// Replaces the group dropdown entries (after "All notes"), keeping the
-/// selected group if it still exists.
+/// Replaces the group dropdown entries, keeping the selected view (a group
+/// that no longer exists falls back to Ungrouped).
 pub fn set_groups(h: HWND, groups: Vec<(GroupId, String)>) {
     let same = LISTS.with(|l| l.borrow().get(&key(h)).is_some_and(|d| d.groups == groups));
     if same {
         return;
     }
-    let selected = group_filter(h);
+    let selected = view(h);
     let cb = group_box(h);
     unsafe {
         SendMessageW(cb, CB_RESETCONTENT, None, None);
-        let all = wide("All notes");
-        SendMessageW(cb, CB_ADDSTRING, None, Some(LPARAM(all.as_ptr() as isize)));
-        for (_, name) in &groups {
-            let w = wide(name);
+        let labels = std::iter::once("Ungrouped").chain(groups.iter().map(|(_, n)| n.as_str())).chain(["All notes"]);
+        for label in labels {
+            let w = wide(label);
             SendMessageW(cb, CB_ADDSTRING, None, Some(LPARAM(w.as_ptr() as isize)));
         }
     }
-    let index = selected.and_then(|g| groups.iter().position(|(id, _)| *id == g)).map_or(0, |i| i + 1);
     LISTS.with(|l| {
         if let Some(d) = l.borrow_mut().get_mut(&key(h)) {
             d.groups = groups;
         }
     });
-    unsafe {
-        SendMessageW(cb, CB_SETCURSEL, Some(WPARAM(index)), None);
+    select_view(h, selected);
+}
+
+/// Dropdown indices: 0 Ungrouped, then the groups, then All notes.
+fn view_index(groups: &[(GroupId, String)], v: ListView) -> usize {
+    match v {
+        ListView::Ungrouped => 0,
+        ListView::Group(g) => groups.iter().position(|(id, _)| *id == g).map_or(0, |i| i + 1),
+        ListView::All => groups.len() + 1,
     }
 }
 
-/// The group the list is limited to (None: all notes).
-pub fn group_filter(h: HWND) -> Option<GroupId> {
+/// The view chosen in the group dropdown.
+pub fn view(h: HWND) -> ListView {
     let i = unsafe { SendMessageW(group_box(h), CB_GETCURSEL, None, None).0 };
-    let i = usize::try_from(i).ok()?.checked_sub(1)?;
-    LISTS.with(|l| l.borrow().get(&key(h)).and_then(|d| d.groups.get(i).map(|(id, _)| *id)))
+    let Ok(i) = usize::try_from(i) else { return ListView::Ungrouped };
+    LISTS.with(|l| {
+        let l = l.borrow();
+        let Some(d) = l.get(&key(h)) else { return ListView::Ungrouped };
+        match i {
+            0 => ListView::Ungrouped,
+            i if i <= d.groups.len() => ListView::Group(d.groups[i - 1].0),
+            _ => ListView::All,
+        }
+    })
 }
 
-/// Limits the list to `group` (None: all notes); the app refreshes the rows.
-pub fn select_group(h: HWND, group: Option<GroupId>) {
-    let index = LISTS.with(|l| {
-        l.borrow()
-            .get(&key(h))
-            .and_then(|d| group.and_then(|g| d.groups.iter().position(|(id, _)| *id == g)))
-            .map_or(0, |i| i + 1)
-    });
+/// Chooses `v` in the group dropdown (a missing group: Ungrouped); the app
+/// refreshes the rows.
+pub fn select_view(h: HWND, v: ListView) {
+    let index = LISTS.with(|l| l.borrow().get(&key(h)).map_or(0, |d| view_index(&d.groups, v)));
     unsafe {
         SendMessageW(group_box(h), CB_SETCURSEL, Some(WPARAM(index)), None);
     }
@@ -578,8 +589,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_COMMAND => {
             let (id, code) = (loword(wp.0) as i32, hiword(wp.0));
-            if (id == ID_FILTER && code == EN_CHANGE) || (id == ID_GROUP && code == CBN_SELCHANGE) {
+            if id == ID_FILTER && code == EN_CHANGE {
                 post(Action::ListFilter(key(h)));
+            } else if id == ID_GROUP && code == CBN_SELCHANGE {
+                post(Action::ListGroup(key(h)));
             }
             LRESULT(0)
         }

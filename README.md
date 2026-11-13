@@ -27,9 +27,15 @@ deleted (🔒 in the list). Untick it to allow deleting again.
   or remove this note, or choose **New group…**.
 - **In the list:** right-click the selected notes (or press `Shift+F10`) for
   **Add to group**, **Remove from group** and **New group…**.
-- **Browsing:** the dropdown left of the filter box limits the list to one
-  group. With a group chosen, the same menu can rename or delete it. Deleting a
-  group never deletes its notes.
+- **Browsing:** the dropdown left of the filter box picks what the list shows:
+  **Ungrouped** (notes in no group), one group, or **All notes**. With a group
+  chosen, the same menu can rename or delete it. Deleting a group never
+  deletes its notes.
+- **Where the list opens:** on Ungrouped at first, then on the last view you
+  picked, remembered across restarts. After New Note it opens on Ungrouped with
+  the new note selected. After Append it opens on the appended note's group
+  with that note selected (your last-picked group if the note is in it). Adding
+  an ungrouped Current note to a group moves the next list view to that group.
 - **Keyboard:** `Tab` cycles filter → list → group dropdown.
 
 ## Build & run

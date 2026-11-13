@@ -11,17 +11,20 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::model::store::{Group, GroupId, Note, NoteId};
+use crate::model::store::{Group, GroupId, ListView, Note, NoteId};
 
 pub use writer::{Job, Status, Writer};
 
 const CURRENT_KEY: &str = "current_note_id";
+const LIST_VIEW_KEY: &str = "list_view";
 const BACKUPS_KEPT: usize = 7;
 
 pub struct Loaded {
     pub notes: Vec<Note>,
     pub groups: Vec<Group>,
     pub current: Option<NoteId>,
+    /// The list's remembered view (None: missing or unreadable).
+    pub list_view: Option<ListView>,
 }
 
 /// Opens (creating if needed) the database, migrates it, and loads all notes.
@@ -65,21 +68,25 @@ fn load(conn: &Connection) -> rusqlite::Result<Loaded> {
     let groups = stmt
         .query_map([], |r| Ok(Group { id: r.get(0)?, name: r.get(1)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let current = conn
-        .query_row("SELECT value FROM settings WHERE key = ?1", [CURRENT_KEY], |r| r.get::<_, String>(0))
-        .optional()?
+    let current = setting(conn, CURRENT_KEY)?
         .and_then(|v| v.parse().ok());
-    Ok(Loaded { notes, groups, current })
+    let list_view = setting(conn, LIST_VIEW_KEY)?.and_then(|v| ListView::from_setting(&v));
+    Ok(Loaded { notes, groups, current, list_view })
+}
+
+fn setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()
 }
 
 /// Writes a batch of group upserts (`Some`) and deletes (`None`), note
-/// upserts (with their group memberships), and an optional current-note
-/// change in one transaction.
+/// upserts (with their group memberships), and optional current-note and
+/// list-view changes in one transaction.
 pub fn write_batch<'a>(
     conn: &Connection,
     groups: &BTreeMap<GroupId, Option<Group>>,
     notes: impl IntoIterator<Item = &'a Note>,
     current: Option<Option<NoteId>>,
+    list_view: Option<ListView>,
 ) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     {
@@ -118,18 +125,24 @@ pub fn write_batch<'a>(
             }
         }
     }
+    let set = |key: &str, value: String| {
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+    };
     match current {
         Some(Some(id)) => {
-            tx.execute(
-                "INSERT INTO settings (key, value) VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![CURRENT_KEY, id.to_string()],
-            )?;
+            set(CURRENT_KEY, id.to_string())?;
         }
         Some(None) => {
             tx.execute("DELETE FROM settings WHERE key = ?1", [CURRENT_KEY])?;
         }
         None => {}
+    }
+    if let Some(v) = list_view {
+        set(LIST_VIEW_KEY, v.to_setting())?;
     }
     tx.commit()
 }
@@ -180,8 +193,8 @@ mod tests {
             assert_eq!(loaded.current, None);
             let v: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
             assert_eq!(v, schema::VERSION);
-            write_batch(&conn, &BTreeMap::new(), &[note(1, "a\nb", 1), note(2, "😀", 4)], Some(Some(2))).unwrap();
-            write_batch(&conn, &BTreeMap::new(), &[note(1, "changed", 2)], None).unwrap();
+            write_batch(&conn, &BTreeMap::new(), &[note(1, "a\nb", 1), note(2, "😀", 4)], Some(Some(2)), None).unwrap();
+            write_batch(&conn, &BTreeMap::new(), &[note(1, "changed", 2)], None, None).unwrap();
         }
         let (_c, loaded) = open(&path).unwrap();
         let mut notes = loaded.notes;
@@ -196,8 +209,8 @@ mod tests {
         let path = dir.path().join("notes.db");
         {
             let (conn, _) = open(&path).unwrap();
-            write_batch(&conn, &BTreeMap::new(), &[note(1, "a", 1)], Some(Some(1))).unwrap();
-            write_batch(&conn, &BTreeMap::new(), std::iter::empty(), Some(None)).unwrap();
+            write_batch(&conn, &BTreeMap::new(), &[note(1, "a", 1)], Some(Some(1)), None).unwrap();
+            write_batch(&conn, &BTreeMap::new(), std::iter::empty(), Some(None), None).unwrap();
         }
         assert_eq!(open(&path).unwrap().1.current, None);
     }
@@ -214,9 +227,9 @@ mod tests {
             a.groups = [1, 2].into();
             let mut b = note(2, "b", 1);
             b.groups = [2].into();
-            write_batch(&conn, &[g(1, "work"), g(2, "ideas"), g(3, "gone")].into(), &[a, b], None).unwrap();
+            write_batch(&conn, &[g(1, "work"), g(2, "ideas"), g(3, "gone")].into(), &[a, b], None, None).unwrap();
             // Rename 1, delete 2 (its memberships go too), drop note 1 from nothing else.
-            write_batch(&conn, &[g(1, "Work"), (2, None), (3, None)].into(), std::iter::empty(), None).unwrap();
+            write_batch(&conn, &[g(1, "Work"), (2, None), (3, None)].into(), std::iter::empty(), None, None).unwrap();
         }
         let (_c, loaded) = open(&path).unwrap();
         assert_eq!(loaded.groups, vec![Group { id: 1, name: "Work".into() }]);
@@ -249,7 +262,7 @@ mod tests {
     fn backup_creates_once_and_prunes() {
         let dir = tempfile::tempdir().unwrap();
         let (conn, _) = open(&dir.path().join("notes.db")).unwrap();
-        write_batch(&conn, &BTreeMap::new(), &[note(1, "a", 1)], None).unwrap();
+        write_batch(&conn, &BTreeMap::new(), &[note(1, "a", 1)], None, None).unwrap();
         let bdir = dir.path().join("backups");
         for day in 1..=9 {
             let date = format!("2026-10-{day:02}");
@@ -265,5 +278,24 @@ mod tests {
         assert_eq!(names[0], "notes-2026-10-03.db");
         let (_c, restored) = open(&bdir.join("notes-2026-10-09.db")).unwrap();
         assert_eq!(restored.notes.len(), 1);
+    }
+
+    #[test]
+    fn list_view_roundtrips_and_bad_values_load_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.db");
+        assert_eq!(open(&path).unwrap().1.list_view, None);
+        for v in [ListView::All, ListView::Group(3), ListView::Ungrouped] {
+            {
+                let (conn, _) = open(&path).unwrap();
+                write_batch(&conn, &BTreeMap::new(), std::iter::empty(), None, Some(v)).unwrap();
+            }
+            assert_eq!(open(&path).unwrap().1.list_view, Some(v));
+        }
+        {
+            let (conn, _) = open(&path).unwrap();
+            conn.execute("UPDATE settings SET value = 'group:x' WHERE key = ?1", [LIST_VIEW_KEY]).unwrap();
+        }
+        assert_eq!(open(&path).unwrap().1.list_view, None);
     }
 }

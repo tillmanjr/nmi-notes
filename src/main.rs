@@ -158,8 +158,9 @@ fn main() {
     install_panic_hook(writer.sender());
 
     let store = Store::new(loaded.notes, loaded.groups, loaded.current);
+    let list_view = store.valid_view(loaded.list_view.unwrap_or_default());
     let paths = app::Paths { backups: data_dir.join("backups"), data_dir, config: config_path };
-    app::install(app::App::new(main, store, writer, config, config_error, paths, events));
+    app::install(app::App::new(main, store, writer, config, config_error, paths, events, list_view));
     app::post(Action::Startup);
 
     let mut msg = MSG::default();

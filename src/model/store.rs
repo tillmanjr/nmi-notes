@@ -50,6 +50,43 @@ pub enum Op {
     RemoveFromGroup { ids: Vec<NoteId>, group: GroupId },
 }
 
+/// Which notes the list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListView {
+    /// Notes in no group.
+    #[default]
+    Ungrouped,
+    Group(GroupId),
+    All,
+}
+
+impl ListView {
+    /// The `settings` value: `ungrouped`, `all` or `group:<id>`.
+    pub fn to_setting(self) -> String {
+        match self {
+            ListView::Ungrouped => "ungrouped".into(),
+            ListView::All => "all".into(),
+            ListView::Group(id) => format!("group:{id}"),
+        }
+    }
+
+    pub fn from_setting(s: &str) -> Option<ListView> {
+        match s {
+            "ungrouped" => Some(ListView::Ungrouped),
+            "all" => Some(ListView::All),
+            _ => s.strip_prefix("group:")?.parse().ok().map(ListView::Group),
+        }
+    }
+
+    fn shows(self, n: &Note) -> bool {
+        match self {
+            ListView::Ungrouped => n.groups.is_empty(),
+            ListView::Group(g) => n.groups.contains(&g),
+            ListView::All => true,
+        }
+    }
+}
+
 /// A text change in UTF-16 units, suitable for replaying into an editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Splice {
@@ -181,16 +218,33 @@ impl Store {
         self.current
     }
 
+    /// `v`, or Ungrouped if it names a group that doesn't exist.
+    pub fn valid_view(&self, v: ListView) -> ListView {
+        match v {
+            ListView::Group(g) if !self.groups.contains_key(&g) => ListView::Ungrouped,
+            v => v,
+        }
+    }
+
+    /// The view that shows note `id`: Ungrouped if it has no groups, else
+    /// `last_picked` if it's a member, else its first group A–Z.
+    pub fn view_for_note(&self, id: NoteId, last_picked: Option<GroupId>) -> ListView {
+        let Some(n) = self.notes.get(&id).filter(|n| !n.groups.is_empty()) else { return ListView::Ungrouped };
+        if let Some(g) = last_picked.filter(|g| n.groups.contains(g)) {
+            return ListView::Group(g);
+        }
+        self.groups().iter().find(|g| n.groups.contains(&g.id)).map_or(ListView::Ungrouped, |g| ListView::Group(g.id))
+    }
+
     /// Live notes matching `filter` (case-insensitive substring over the full
-    /// text) and, if given, in `group`: current first, then by `updated`
-    /// descending.
-    pub fn list(&self, filter: &str, group: Option<GroupId>) -> Vec<NoteId> {
+    /// text) and shown by `view`: current first, then by `updated` descending.
+    pub fn list(&self, filter: &str, view: ListView) -> Vec<NoteId> {
         let needle = filter.trim().to_lowercase();
         let mut rows: Vec<&Note> = self
             .notes
             .values()
             .filter(|n| n.deleted_at.is_none())
-            .filter(|n| group.is_none_or(|g| n.groups.contains(&g)))
+            .filter(|n| view.shows(n))
             .filter(|n| needle.is_empty() || n.text.to_lowercase().contains(&needle))
             .collect();
         rows.sort_by(|a, b| {
@@ -418,10 +472,10 @@ mod tests {
             vec![Change::Current { old: Some(a), new: None }, Change::Deleted { ids: vec![a] }]
         );
         assert_eq!(s.current(), None);
-        assert_eq!(s.list("", None), vec![b]);
+        assert_eq!(s.list("", ListView::All), vec![b]);
         assert_eq!(s.dispatch(Op::Append { id: a, text: "x".into() }, 5), Err(StoreError::NoSuchNote(a)));
         s.dispatch(Op::Undelete { ids: vec![a] }, 6).unwrap();
-        assert_eq!(s.list("", None), vec![b, a]);
+        assert_eq!(s.list("", ListView::All), vec![b, a]);
     }
 
     #[test]
@@ -430,12 +484,12 @@ mod tests {
         let a = create(&mut s, "alpha", 1);
         let b = create(&mut s, "Beta", 2);
         let c = create(&mut s, "gamma beta", 3);
-        assert_eq!(s.list("", None), vec![c, b, a]);
+        assert_eq!(s.list("", ListView::All), vec![c, b, a]);
         s.dispatch(Op::SetCurrent { id: Some(a) }, 4).unwrap();
-        assert_eq!(s.list("", None), vec![a, c, b]);
+        assert_eq!(s.list("", ListView::All), vec![a, c, b]);
         s.dispatch(Op::Append { id: b, text: "more".into() }, 10).unwrap();
-        assert_eq!(s.list("", None), vec![a, b, c]);
-        assert_eq!(s.list("BETA", None), vec![b, c]);
+        assert_eq!(s.list("", ListView::All), vec![a, b, c]);
+        assert_eq!(s.list("BETA", ListView::All), vec![b, c]);
     }
 
     #[test]
@@ -464,7 +518,7 @@ mod tests {
         let ch = s.dispatch(Op::Delete { ids: vec![a, b] }, 4).unwrap();
         assert_eq!(ch, vec![Change::Deleted { ids: vec![b] }]);
         assert!(s.dispatch(Op::Delete { ids: vec![a] }, 5).unwrap().is_empty());
-        assert_eq!(s.list("", None), vec![a]);
+        assert_eq!(s.list("", ListView::All), vec![a]);
         s.dispatch(Op::SetProtected { id: a, protected: false }, 6).unwrap();
         assert_eq!(s.dispatch(Op::Delete { ids: vec![a] }, 7).unwrap(), vec![Change::Deleted { ids: vec![a] }]);
     }
@@ -500,14 +554,14 @@ mod tests {
         assert!(s.dispatch(Op::AddToGroup { ids: vec![a], group: work }, 3).unwrap().is_empty());
         s.dispatch(Op::AddToGroup { ids: vec![a], group: ideas }, 3).unwrap();
         assert_eq!(s.group_names(a), "ideas, work");
-        assert_eq!(s.list("", Some(ideas)), vec![a]);
-        assert_eq!(s.list("bet", Some(work)), vec![b]);
+        assert_eq!(s.list("", ListView::Group(ideas)), vec![a]);
+        assert_eq!(s.list("bet", ListView::Group(work)), vec![b]);
         assert_eq!(s.note(a).unwrap().updated, 1, "membership doesn't bump updated");
 
         s.dispatch(Op::RemoveFromGroup { ids: vec![a, b], group: ideas }, 4).unwrap();
-        assert!(s.list("", Some(ideas)).is_empty());
+        assert!(s.list("", ListView::Group(ideas)).is_empty());
         assert_eq!(s.dispatch(Op::DeleteGroup { id: work }, 5).unwrap(), vec![Change::GroupDeleted { id: work, ids: vec![a, b] }]);
-        assert_eq!(s.list("", None).len(), 2);
+        assert_eq!(s.list("", ListView::All).len(), 2);
         assert_eq!(s.group_names(a), "");
         assert_eq!(s.dispatch(Op::AddToGroup { ids: vec![a], group: work }, 6), Err(StoreError::NoSuchGroup(work)));
     }
@@ -519,5 +573,52 @@ mod tests {
         assert_eq!(s.note(1).unwrap().groups, [1].into());
         let mut s = s;
         assert_eq!(group(&mut s, "h"), 2);
+    }
+
+    #[test]
+    fn list_ungrouped_and_all() {
+        let mut s = Store::new(vec![], vec![], None);
+        let a = create(&mut s, "a", 1);
+        let b = create(&mut s, "b", 2);
+        let work = group(&mut s, "work");
+        s.dispatch(Op::AddToGroup { ids: vec![a], group: work }, 3).unwrap();
+        assert_eq!(s.list("", ListView::Ungrouped), vec![b]);
+        assert_eq!(s.list("", ListView::Group(work)), vec![a]);
+        assert_eq!(s.list("", ListView::All), vec![b, a]);
+    }
+
+    #[test]
+    fn view_for_note_rules() {
+        let mut s = Store::new(vec![], vec![], None);
+        let a = create(&mut s, "a", 1);
+        let work = group(&mut s, "work");
+        let ideas = group(&mut s, "Ideas");
+        assert_eq!(s.view_for_note(a, Some(work)), ListView::Ungrouped);
+        assert_eq!(s.view_for_note(99, None), ListView::Ungrouped);
+        s.dispatch(Op::AddToGroup { ids: vec![a], group: work }, 2).unwrap();
+        s.dispatch(Op::AddToGroup { ids: vec![a], group: ideas }, 2).unwrap();
+        assert_eq!(s.view_for_note(a, Some(work)), ListView::Group(work));
+        assert_eq!(s.view_for_note(a, None), ListView::Group(ideas), "first A–Z, ignoring case");
+        let other = group(&mut s, "other");
+        assert_eq!(s.view_for_note(a, Some(other)), ListView::Group(ideas));
+    }
+
+    #[test]
+    fn list_view_setting_roundtrip() {
+        for v in [ListView::Ungrouped, ListView::All, ListView::Group(7)] {
+            assert_eq!(ListView::from_setting(&v.to_setting()), Some(v));
+        }
+        for bad in ["", "group:", "group:x", "Group:1", "none"] {
+            assert_eq!(ListView::from_setting(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn valid_view_drops_missing_group() {
+        let mut s = Store::new(vec![], vec![], None);
+        let work = group(&mut s, "work");
+        assert_eq!(s.valid_view(ListView::Group(work)), ListView::Group(work));
+        assert_eq!(s.valid_view(ListView::Group(work + 1)), ListView::Ungrouped);
+        assert_eq!(s.valid_view(ListView::All), ListView::All);
     }
 }

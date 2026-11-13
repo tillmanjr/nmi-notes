@@ -72,6 +72,26 @@ round-trip, which briefly overwrites the clipboard).
 - [ ] Open the list from an editor with `Esc` and the group filter is the
       same as when the note was opened.
 
+## Default view
+
+- [ ] Fresh data: the list opens on **Ungrouped**; the dropdown order is
+      Ungrouped, the groups A–Z, All notes.
+- [ ] `Win+Alt+N`, then `Win+Alt+L`: the list opens on Ungrouped with the new
+      note selected (focus in the filter box).
+- [ ] Make a note in Work Current, `Win+Alt+A`, then `Win+Alt+L`: the list opens
+      on Work with it selected. With the note in Work and Ideas and Ideas last
+      picked in the dropdown: the list opens on Ideas.
+- [ ] Add the ungrouped Current note to a group (editor **Groups ▾** or the list
+      menu): the next `Win+Alt+L` opens on that group.
+- [ ] With the list already open, New Note / Append and `Win+Alt+L` again: the
+      dropdown switches and the note is selected; the text filter is kept.
+- [ ] Pick a group, restart the app: the list opens on that group.
+- [ ] Delete the group being shown: the list and the next open fall back to
+      Ungrouped.
+- [ ] Open a note from the list, `Esc`: back to the same view and filter.
+- [ ] Titles: "Ungrouped notes (n of N)", "Notes in “…” (n of N)",
+      "All notes (N)".
+
 ## Look
 
 - [ ] Editor, list, title bars, scrollbars, tray menu and tooltips are dark.

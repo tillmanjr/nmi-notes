@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nmi_notes::config::{parse_hotkey, Config};
 use nmi_notes::model::diff::{apply_utf16, diff_utf16};
 use nmi_notes::model::placement::{place_window, Point};
-use nmi_notes::model::store::{Change, GroupId, NoteId, Op, Store, StoreError};
+use nmi_notes::model::store::{Change, GroupId, ListView, NoteId, Op, Store, StoreError};
 use nmi_notes::model::text::{compact_count, ellipsize, first_line, line_count, relative_time, utf16_len};
 use nmi_notes::persist::{Job, Status, Writer};
 use windows::core::{w, PCWSTR};
@@ -117,6 +117,8 @@ pub enum Action {
     /// Groups button clicked: show the groups menu.
     EditorGroups(isize),
     ListFilter(isize),
+    /// The user picked an entry in the group dropdown.
+    ListGroup(isize),
     ListOpen(isize),
     ListMakeCurrent(isize),
     ListDelete(isize),
@@ -339,9 +341,15 @@ pub struct App {
     spare_list: Option<HWND>,
     lists: Vec<isize>,
     last_deleted: Vec<NoteId>,
-    /// Filter and group of the list that last opened notes, restored on return.
+    /// Filter and view of the list that last opened notes, restored on return.
     list_filter: String,
-    list_group: Option<GroupId>,
+    back_view: ListView,
+    /// What the list opens on (persisted).
+    list_view: ListView,
+    /// The group last chosen by hand in the dropdown.
+    last_picked: Option<GroupId>,
+    /// Note to select the next time the list opens (after New Note / Append).
+    list_select: Option<NoteId>,
     prompt: Option<Prompt>,
     fonts: Fonts,
     editor_size_96: (i32, i32),
@@ -362,6 +370,7 @@ impl App {
         config_error: Option<String>,
         paths: Paths,
         writer_events: Arc<Mutex<Vec<Status>>>,
+        list_view: ListView,
     ) -> App {
         App {
             main,
@@ -378,7 +387,13 @@ impl App {
             lists: Vec::new(),
             last_deleted: Vec::new(),
             list_filter: String::new(),
-            list_group: None,
+            back_view: ListView::Ungrouped,
+            list_view,
+            last_picked: match list_view {
+                ListView::Group(g) => Some(g),
+                _ => None,
+            },
+            list_select: None,
             prompt: None,
             fonts: Fonts::default(),
             editor_size_96: EDITOR_SIZE,
@@ -437,6 +452,15 @@ impl App {
             }
             Action::EditorGroups(k) => self.editor_groups_menu(k),
             Action::ListFilter(k) => self.refresh_list(win::hwnd(k)),
+            Action::ListGroup(k) => {
+                let h = win::hwnd(k);
+                self.refresh_list(h);
+                let v = listwin::view(h);
+                if let ListView::Group(g) = v {
+                    self.last_picked = Some(g);
+                }
+                self.set_list_view(v);
+            }
             Action::ListOpen(k) => {
                 let h = win::hwnd(k);
                 let mut ids = listwin::selected_ids(h);
@@ -447,7 +471,7 @@ impl App {
                     return;
                 }
                 self.list_filter = listwin::filter_text(h);
-                self.list_group = listwin::group_filter(h);
+                self.back_view = listwin::view(h);
                 unsafe {
                     let _ = DestroyWindow(h);
                 }
@@ -570,9 +594,9 @@ impl App {
             log!("hotkeys unavailable: {}", failed.join(", "));
             toast::show(&format!("Hotkey unavailable: {}", failed.join(", ")));
         } else {
-            toast::show(&format!("nmi-notes ready — {} notes", self.store.list("", None).len()));
+            toast::show(&format!("nmi-notes ready — {} notes", self.store.list("", ListView::All).len()));
         }
-        log!("started with {} notes", self.store.list("", None).len());
+        log!("started with {} notes", self.store.list("", ListView::All).len());
     }
 
     fn shutdown(&mut self) {
@@ -693,6 +717,8 @@ impl App {
                     Some(id) => {
                         self.flush_note_editors(id);
                         if self.apply(Op::Append { id, text: t }, None).is_some() {
+                            self.set_list_view(self.store.view_for_note(id, self.last_picked));
+                            self.list_select = Some(id);
                             toast::show(&format!("Appended to: {}", self.preview(id, 60)));
                         }
                     }
@@ -736,7 +762,48 @@ impl App {
             _ => None,
         })?;
         self.apply(Op::SetCurrent { id: Some(id) }, None);
+        self.set_list_view(ListView::Ungrouped);
+        self.list_select = Some(id);
         Some(id)
+    }
+
+    /// Remembers what the list opens on next.
+    fn set_list_view(&mut self, v: ListView) {
+        if self.list_view != v {
+            self.list_view = v;
+            self.writer.send(Job::SetListView(v));
+        }
+    }
+
+    /// Keeps the remembered views in step with group changes: the Current
+    /// note leaving Ungrouped moves the view to its group, and a deleted
+    /// group stops being remembered.
+    fn track_views(&mut self, changes: &[Change], current_was_ungrouped: bool) {
+        let current = self.store.current();
+        for ch in changes {
+            match ch {
+                Change::Membership { ids } => {
+                    if let Some(cur) = current.filter(|c| current_was_ungrouped && ids.contains(c)) {
+                        let v = self.store.view_for_note(cur, None);
+                        if v != ListView::Ungrouped {
+                            self.set_list_view(v);
+                        }
+                    }
+                }
+                Change::GroupDeleted { id, .. } => {
+                    if self.list_view == ListView::Group(*id) {
+                        self.set_list_view(ListView::Ungrouped);
+                    }
+                    if self.back_view == ListView::Group(*id) {
+                        self.back_view = ListView::Ungrouped;
+                    }
+                    if self.last_picked == Some(*id) {
+                        self.last_picked = None;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn preview(&self, id: NoteId, max: usize) -> String {
@@ -759,9 +826,12 @@ impl App {
     /// Dispatches, persists, and routes. `origin` is the editor that produced
     /// the op (it already shows the result).
     fn apply(&mut self, op: Op, origin: Option<isize>) -> Option<Vec<Change>> {
+        let current_was_ungrouped =
+            self.store.current().and_then(|c| self.store.note(c)).is_some_and(|n| n.groups.is_empty());
         match self.store.dispatch(op, now_ms()) {
             Ok(changes) => {
                 self.persist(&changes);
+                self.track_views(&changes, current_was_ungrouped);
                 self.route(&changes, origin);
                 Some(changes)
             }
@@ -1111,13 +1181,20 @@ impl App {
             let h = win::hwnd(*k);
             (unsafe { IsWindowVisible(h).as_bool() }) && self.vdesk.is_on_current(h)
         });
+        let select = if back.is_none() { self.list_select.take() } else { None };
         if let Some(k) = existing {
             let h = win::hwnd(k);
             if let Some((filter, id)) = back {
-                listwin::select_group(h, self.list_group);
+                listwin::select_view(h, self.back_view);
                 listwin::set_filter(h, filter);
                 self.refresh_list(h);
                 listwin::select_only(h, id);
+            } else if listwin::view(h) != self.list_view || select.is_some() {
+                listwin::select_view(h, self.list_view);
+                self.refresh_list(h);
+                if let Some(id) = select {
+                    listwin::select_only(h, id);
+                }
             }
             listwin::show_at(h, r);
             self.log_visible();
@@ -1135,13 +1212,16 @@ impl App {
         let ui = self.fonts.get(1, dpi, &self.config);
         let bold = self.fonts.get(2, dpi, &self.config);
         listwin::set_fonts(h, ui, bold);
-        if let Some((filter, _)) = back {
-            self.refresh_list(h); // loads the group dropdown
-            listwin::select_group(h, self.list_group);
-            listwin::set_filter(h, filter);
+        self.refresh_list(h); // loads the group dropdown
+        match back {
+            Some((filter, _)) => {
+                listwin::select_view(h, self.back_view);
+                listwin::set_filter(h, filter);
+            }
+            None => listwin::select_view(h, self.list_view),
         }
         self.refresh_list(h);
-        if let Some((_, id)) = back {
+        if let Some(id) = back.map(|(_, id)| id).or(select) {
             listwin::select_only(h, id);
         }
         listwin::show_at(h, r);
@@ -1166,13 +1246,13 @@ impl App {
 
     fn refresh_list(&mut self, h: HWND) {
         listwin::set_groups(h, self.store.groups().iter().map(|g| (g.id, g.name.clone())).collect());
-        let group = listwin::group_filter(h);
+        let view = listwin::view(h);
         let filter = listwin::filter_text(h);
         let now = now_ms();
         let current = self.store.current();
         let rows: Vec<listwin::Row> = self
             .store
-            .list(&filter, group)
+            .list(&filter, view)
             .into_iter()
             .filter_map(|id| self.store.note(id))
             .map(|n| listwin::Row {
@@ -1188,12 +1268,17 @@ impl App {
             .collect();
         let shown = rows.len();
         listwin::populate(h, rows);
-        let count = self.store.list("", None).len();
-        let title = match (group.and_then(|g| self.store.group(g)), filter.trim().is_empty()) {
-            (None, true) => format!("Notes ({count}) — nmi-notes"),
-            (None, false) => format!("Notes ({shown} of {count}) — nmi-notes"),
-            (Some(g), _) => format!("Notes in {} ({shown} of {count}) — nmi-notes", quoted(&g.name)),
+        let count = self.store.list("", ListView::All).len();
+        let title = match view {
+            ListView::All if filter.trim().is_empty() => format!("All notes ({count})"),
+            ListView::All => format!("All notes ({shown} of {count})"),
+            ListView::Ungrouped => format!("Ungrouped notes ({shown} of {count})"),
+            ListView::Group(g) => {
+                let name = self.store.group(g).map_or(String::new(), |g| quoted(&g.name));
+                format!("Notes in {name} ({shown} of {count})")
+            }
         };
+        let title = format!("{title} — nmi-notes");
         editor::set_caption(h, &title);
     }
 
@@ -1265,7 +1350,10 @@ impl App {
             .filter(|(_, (g, _))| in_group(*g) > 0)
             .map(|(i, (_, name))| menu::Item::cmd(MENU_REMOVE + i as u32, menu_text(name)))
             .collect();
-        let filtered = listwin::group_filter(h).and_then(|g| self.store.group(g)).map(|g| (g.id, g.name.clone()));
+        let filtered = match listwin::view(h) {
+            ListView::Group(g) => self.store.group(g).map(|g| (g.id, g.name.clone())),
+            _ => None,
+        };
         let mut items = vec![
             menu::Item::Sub { label: "Add to group".into(), enabled: !sel.is_empty(), items: add },
             menu::Item::Sub { label: "Remove from group".into(), enabled: !remove.is_empty(), items: remove },
@@ -1294,9 +1382,6 @@ impl App {
             MENU_DELETE_GROUP => {
                 if let Some((g, name)) = filtered {
                     if self.apply(Op::DeleteGroup { id: g }, None).is_some() {
-                        if self.list_group == Some(g) {
-                            self.list_group = None;
-                        }
                         toast::show(&format!("Deleted group {} — its notes are kept", quoted(&name)));
                     }
                 }
